@@ -16,7 +16,7 @@ public final class FileEventLogger: EventLogger {
     private let queue = DispatchQueue(label: "convert-video-2-mp3.file-logger")
     private let formatter: ISO8601DateFormatter
 
-    public init(logURL: URL) throws {
+    public init(logURL: URL, resetOnOpen: Bool = false) throws {
         self.logURL = logURL
         formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -24,7 +24,9 @@ public final class FileEventLogger: EventLogger {
             at: logURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        if !FileManager.default.fileExists(atPath: logURL.path) {
+        if resetOnOpen {
+            try Data().write(to: logURL, options: [.atomic])
+        } else if !FileManager.default.fileExists(atPath: logURL.path) {
             FileManager.default.createFile(atPath: logURL.path, contents: nil)
         }
     }

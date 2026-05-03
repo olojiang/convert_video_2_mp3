@@ -216,7 +216,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     }
 
     private static func makeLogger() -> FileEventLogger {
-        if let logger = try? FileEventLogger(logURL: AppPaths.defaultLogURL()) {
+        if let logger = try? FileEventLogger(logURL: AppPaths.nextLogURL(), resetOnOpen: true) {
             return logger
         }
 
@@ -1097,15 +1097,36 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         do {
             stopPlaybackTimer()
             audioPlayer?.stop()
+            audioPlayer = nil
+            currentTrackID = nil
             let player = try AVAudioPlayer(contentsOf: track.url)
             player.delegate = self
+            player.volume = 1
+            player.prepareToPlay()
+
+            let requestedTime: TimeInterval?
             if resumeSavedPosition,
                restoredPlaybackPosition?.trackID == track.id,
                let time = restoredPlaybackPosition?.time {
-                player.currentTime = min(max(0, time), max(0, player.duration - 1))
+                requestedTime = time
+            } else {
+                requestedTime = nil
             }
-            player.prepareToPlay()
-            player.play()
+
+            if let requestedTime {
+                player.currentTime = resumedPlaybackTime(requestedTime, duration: player.duration)
+            }
+
+            guard player.play() else {
+                logger.log(.error, event: "mp3.playback_start_rejected", details: [
+                    "duration": "\(player.duration)",
+                    "requested_time": "\(requestedTime ?? 0)",
+                    "track": track.url.path
+                ])
+                updateProgressSeekability()
+                showMessage(title: "MP3 无法播放", text: "系统音频播放器拒绝开始播放这个 MP3。请查看日志了解详情。")
+                return
+            }
 
             audioPlayer = player
             currentTrackID = track.id
@@ -1115,8 +1136,11 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             startPlaybackTimer()
             saveCurrentPlaybackPosition()
             logger.log(.info, event: "mp3.playback_started", details: [
+                "duration": "\(player.duration)",
+                "requested_time": "\(requestedTime ?? 0)",
                 "track": track.url.path,
-                "time": "\(Int(player.currentTime))"
+                "time": "\(Int(player.currentTime))",
+                "volume": "\(player.volume)"
             ])
             refresh(reloadTable: false)
         } catch {
@@ -1148,6 +1172,12 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         player.currentTime = min(max(0, progress), 1) * player.duration
         saveCurrentPlaybackPosition()
         refresh(reloadTable: false)
+    }
+
+    private func resumedPlaybackTime(_ requestedTime: TimeInterval, duration: TimeInterval) -> TimeInterval {
+        guard duration.isFinite, duration > 0 else { return max(0, requestedTime) }
+        let latestUsefulResumeTime = max(0, duration - 30)
+        return min(max(0, requestedTime), latestUsefulResumeTime)
     }
 
     private func updateProgressSeekability() {
@@ -1418,12 +1448,33 @@ enum AppPaths {
         return base.appendingPathComponent("ConvertVideo2MP3", isDirectory: true)
     }
 
-    static func defaultLogURL() -> URL {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd"
-        return supportDirectory()
+    static func nextLogURL(defaults: UserDefaults = .standard) -> URL {
+        let slotCount = 5
+        let key = "rotatingLogSlot"
+        let currentSlot = defaults.integer(forKey: key)
+        let nextSlot = (currentSlot % slotCount) + 1
+        defaults.set(nextSlot, forKey: key)
+        let directory = supportDirectory()
             .appendingPathComponent("logs", isDirectory: true)
-            .appendingPathComponent("app-\(formatter.string(from: Date())).log")
+        removeLegacyLogFiles(in: directory, keepingSlots: slotCount)
+        return directory
+            .appendingPathComponent("app-\(nextSlot).log")
+    }
+
+    private static func removeLegacyLogFiles(in directory: URL, keepingSlots slotCount: Int) {
+        let allowedNames = Set((1...slotCount).map { "app-\($0).log" })
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ) else {
+            return
+        }
+
+        for file in files where file.lastPathComponent.hasPrefix("app-")
+            && file.pathExtension == "log"
+            && !allowedNames.contains(file.lastPathComponent) {
+            try? FileManager.default.removeItem(at: file)
+        }
     }
 
     static func stateURL(for root: URL) -> URL {
