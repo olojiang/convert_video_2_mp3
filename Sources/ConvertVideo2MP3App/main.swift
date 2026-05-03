@@ -462,7 +462,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         case .pending: return "待处理"
         case .converting: return "转换中 \(Int(task.progress * 100))%"
         case .succeeded: return "成功"
-        case .failed: return "失败：\(task.errorMessage ?? "未知错误")"
+        case .failed: return "失败，详情见日志"
         case .cancelled: return "已停止"
         }
     }

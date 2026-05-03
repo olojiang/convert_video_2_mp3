@@ -37,4 +37,30 @@ struct TaskStateStoreTests {
 
         #expect(restored[0].status == .succeeded)
     }
+
+    @Test func resetsFailedTasksToPendingOnLoadSoTheyCanRetry() throws {
+        let root = try TemporaryDirectory()
+        let stateURL = root.url.appendingPathComponent("state.json")
+        let source = root.url.appendingPathComponent("retry.mp4")
+        let output = root.url.appendingPathComponent("retry.mp3")
+        try "video".write(to: source, atomically: true, encoding: .utf8)
+
+        let store = TaskStateStore(stateURL: stateURL)
+        try store.save([
+            ConversionTask(
+                video: VideoFile(sourceURL: source, outputURL: output),
+                status: .failed,
+                progress: 0.25,
+                errorMessage: "old failure"
+            )
+        ])
+
+        let restored = try TaskStateStore(stateURL: stateURL).load(for: [
+            VideoFile(sourceURL: source, outputURL: output)
+        ])
+
+        #expect(restored[0].status == .pending)
+        #expect(restored[0].progress == 0)
+        #expect(restored[0].errorMessage == nil)
+    }
 }

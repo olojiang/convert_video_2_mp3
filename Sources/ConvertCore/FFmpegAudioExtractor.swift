@@ -36,6 +36,7 @@ public final class FFmpegAudioExtractor: AudioExtracting {
             "-vn",
             "-codec:a", "libmp3lame",
             "-q:a", "2",
+            "-f", "mp3",
             tempOutput.path
         ]
 

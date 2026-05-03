@@ -29,7 +29,7 @@ public final class TaskStateStore {
                 return ConversionTask(video: video)
             }
 
-            if task.status == .converting || task.status == .cancelled {
+            if task.status == .converting || task.status == .cancelled || task.status == .failed {
                 task.status = .pending
                 task.progress = 0
                 task.errorMessage = nil
