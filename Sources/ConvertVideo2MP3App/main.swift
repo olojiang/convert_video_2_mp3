@@ -42,14 +42,21 @@ private enum BootstrapLog {
     }
 }
 
+enum ArrowKeyDirection {
+    case left
+    case right
+}
+
 final class KeyHandlingTableView: NSTableView {
     var onSpace: ((Bool) -> Void)?
+    var onReturnKey: (() -> Bool)?
+    var onArrowKey: ((ArrowKeyDirection, Bool) -> Bool)?
     var onCommandBackspace: (() -> Void)?
     var onShiftCommandBackspace: (() -> Void)?
 
     override func keyDown(with event: NSEvent) {
+        let modifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if event.keyCode == 51 {
-            let modifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             if modifierFlags.contains(.command), modifierFlags.contains(.shift) {
                 onShiftCommandBackspace?()
                 return
@@ -64,6 +71,24 @@ final class KeyHandlingTableView: NSTableView {
         if event.keyCode == 49 {
             onSpace?(event.modifierFlags.contains(.control))
             return
+        }
+
+        if event.keyCode == 36 || event.keyCode == 76 {
+            if onReturnKey?() == true {
+                return
+            }
+        }
+
+        if event.keyCode == 123 {
+            if onArrowKey?(.left, modifierFlags.contains(.shift)) == true {
+                return
+            }
+        }
+
+        if event.keyCode == 124 {
+            if onArrowKey?(.right, modifierFlags.contains(.shift)) == true {
+                return
+            }
         }
 
         super.keyDown(with: event)
@@ -261,6 +286,22 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             } else {
                 self.playFocusedRow(openMP3: controlPressed)
             }
+        }
+        tableView.onReturnKey = { [weak self] in
+            guard let self, self.appMode == .mp3Playback else { return false }
+            self.playFocusedMP3OrToggle()
+            return true
+        }
+        tableView.onArrowKey = { [weak self] direction, shiftPressed in
+            guard let self, self.appMode == .mp3Playback else { return false }
+            let seconds: TimeInterval = shiftPressed ? 30 : 5
+            switch direction {
+            case .left:
+                self.seekMP3(by: -seconds)
+            case .right:
+                self.seekMP3(by: seconds)
+            }
+            return true
         }
         tableView.onCommandBackspace = { [weak self] in
             guard self?.appMode == .conversion else { return }
@@ -472,6 +513,9 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         Space：播放选中行的视频
         Ctrl+Space：播放选中行的 MP3
         MP3 播放模式 Space：播放/暂停或播放选中 MP3
+        MP3 播放模式 Enter：播放/暂停或播放选中 MP3
+        MP3 播放模式 ←/→：后退/前进 5s
+        MP3 播放模式 Shift+←/→：后退/前进 30s
         Shift+Cmd+Backspace：确认后仅删除选中源视频
         Cmd+Backspace：确认后删除选中视频所在文件夹
         """
@@ -1164,12 +1208,10 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         guard let id = tableColumn?.identifier.rawValue else { return nil }
         if appMode == .mp3Playback {
             guard row < mp3Tracks.count else { return nil }
-            let text = NSTextField(labelWithString: value(for: id, track: mp3Tracks[row]))
-            text.lineBreakMode = .byTruncatingMiddle
-            if id == "status" {
-                text.textColor = mp3StatusColor(for: mp3Tracks[row])
-            }
-            return text
+            return makeTextCell(
+                value(for: id, track: mp3Tracks[row]),
+                color: id == "status" ? mp3StatusColor(for: mp3Tracks[row]) : .labelColor
+            )
         }
 
         guard row < tasks.count else { return nil }
@@ -1183,12 +1225,29 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             return button
         }
 
-        let text = NSTextField(labelWithString: value(for: id, task: task))
-        text.lineBreakMode = .byTruncatingMiddle
-        if id == "status" {
-            text.textColor = color(for: task.status)
-        }
-        return text
+        return makeTextCell(
+            value(for: id, task: task),
+            color: id == "status" ? color(for: task.status) : .labelColor
+        )
+    }
+
+    private func makeTextCell(_ text: String, color: NSColor = .labelColor) -> NSView {
+        let container = NSView()
+        let label = NSTextField(labelWithString: text)
+        label.lineBreakMode = .byTruncatingMiddle
+        label.textColor = color
+        label.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(label)
+
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor),
+            label.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            label.topAnchor.constraint(greaterThanOrEqualTo: container.topAnchor),
+            label.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor)
+        ])
+
+        return container
     }
 
     func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
