@@ -277,6 +277,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
         tableView.dataSource = self
         tableView.delegate = self
+        tableView.target = self
+        tableView.doubleAction = #selector(tableViewDoubleClicked(_:))
         tableView.autosaveName = "conversionTasksTable"
         tableView.autosaveTableColumns = true
         tableView.onSpace = { [weak self] controlPressed in
@@ -512,6 +514,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         shortcutHelpButton.toolTip = """
         Space：播放选中行的视频
         Ctrl+Space：播放选中行的 MP3
+        MP3 播放模式双击：播放/暂停被双击的 MP3
         MP3 播放模式 Space：播放/暂停或播放选中 MP3
         MP3 播放模式 Enter：播放/暂停或播放选中 MP3
         MP3 播放模式 ←/→：后退/前进 5s
@@ -994,6 +997,18 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         }
 
         toggleMP3Playback()
+    }
+
+    @objc private func tableViewDoubleClicked(_ sender: NSTableView) {
+        guard sender === tableView,
+              appMode == .mp3Playback else {
+            return
+        }
+
+        let row = sender.clickedRow
+        guard row >= 0, row < mp3Tracks.count else { return }
+        sender.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        playFocusedMP3OrToggle()
     }
 
     @objc private func toggleMP3Playback() {
