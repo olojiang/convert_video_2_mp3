@@ -18,6 +18,7 @@ flowchart LR
 - `ConversionCoordinatorTests`：并发数不超过配置；停止后不会继续启动所有待处理任务。
 - `ConversionCoordinatorTests`：勾选成功后删除源视频时，成功转换后会删除源文件。
 - `ConversionCoordinatorTests`：转换过程中 extractor 上报的进度会同步到任务更新。
+- `PartFolderCleanerTests`：扫描包含 `.mp4.part` 的文件夹，并在确认后可递归删除候选文件夹。
 - `FileLoggerTests`：日志落盘并包含事件、状态、源文件等排查字段。
 
 ## 验证命令

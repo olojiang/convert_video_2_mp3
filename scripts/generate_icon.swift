@@ -15,15 +15,15 @@ func drawIcon(size: CGFloat) -> NSImage {
     defer { image.unlockFocus() }
 
     let rect = NSRect(x: 0, y: 0, width: size, height: size)
-    NSColor(calibratedRed: 0.05, green: 0.52, blue: 0.86, alpha: 1).setFill()
+    NSColor.clear.setFill()
     rect.fill()
 
-    let background = rect.insetBy(dx: size * 0.035, dy: size * 0.035)
+    let background = rect.insetBy(dx: size * 0.04, dy: size * 0.04)
     NSColor(calibratedRed: 0.10, green: 0.57, blue: 0.88, alpha: 1).setFill()
-    NSBezierPath(roundedRect: background, xRadius: size * 0.18, yRadius: size * 0.18).fill()
+    NSBezierPath(roundedRect: background, xRadius: size * 0.22, yRadius: size * 0.22).fill()
 
     NSColor.white.withAlphaComponent(0.18).setStroke()
-    let highlight = NSBezierPath(roundedRect: background.insetBy(dx: size * 0.018, dy: size * 0.018), xRadius: size * 0.16, yRadius: size * 0.16)
+    let highlight = NSBezierPath(roundedRect: background.insetBy(dx: size * 0.018, dy: size * 0.018), xRadius: size * 0.20, yRadius: size * 0.20)
     highlight.lineWidth = max(1, size * 0.012)
     highlight.stroke()
 

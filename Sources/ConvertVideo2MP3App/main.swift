@@ -51,6 +51,7 @@ final class KeyHandlingTableView: NSTableView {
 
 final class MainWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {
     private let scanner = VideoScanner()
+    private let partFolderCleaner = PartFolderCleaner()
     private let historyStore = RootHistoryStore()
     private let logger: FileEventLogger
     private var stateStore: TaskStateStore?
@@ -72,6 +73,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private let startButton = NSButton(title: "开始转 MP3", target: nil, action: nil)
     private let stopButton = NSButton(title: "停止", target: nil, action: nil)
     private let revealLogsButton = NSButton(title: "打开日志", target: nil, action: nil)
+    private let cleanPartFoldersButton = NSButton(title: "清理 .mp4.part 文件夹", target: nil, action: nil)
     private let deleteSourceCheckbox = NSButton(checkboxWithTitle: "成功后删除源视频", target: nil, action: nil)
     private let concurrencyPopup = NSPopUpButton()
     private let progressIndicator = NSProgressIndicator()
@@ -126,6 +128,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             deleteSourceCheckbox,
             startButton,
             stopButton,
+            cleanPartFoldersButton,
             revealLogsButton
         ])
         toolbar.orientation = .horizontal
@@ -198,6 +201,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         stopButton.action = #selector(stopConversion)
         revealLogsButton.target = self
         revealLogsButton.action = #selector(revealLogs)
+        cleanPartFoldersButton.target = self
+        cleanPartFoldersButton.action = #selector(cleanPartFolders)
         deleteSourceCheckbox.target = self
         deleteSourceCheckbox.action = #selector(deleteSourceOptionChanged)
 
@@ -316,6 +321,63 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         NSWorkspace.shared.activateFileViewerSelecting([logger.logURL])
     }
 
+    @objc private func cleanPartFolders() {
+        guard let rootURL else {
+            showMessage(title: "还没有选择根目录", text: "请先选择要扫描的视频根目录。")
+            return
+        }
+
+        do {
+            logger.log(.info, event: "cleanup.part_folders.scan_started", details: ["root": rootURL.path])
+            let candidates = try partFolderCleaner.scan(root: rootURL)
+            logger.log(.info, event: "cleanup.part_folders.scan_finished", details: [
+                "root": rootURL.path,
+                "folders": "\(candidates.count)",
+                "part_files": "\(candidates.reduce(0) { $0 + $1.partFiles.count })"
+            ])
+
+            guard !candidates.isEmpty else {
+                showMessage(title: "没有发现可清理文件夹", text: "当前根目录下没有包含 .mp4.part 文件的文件夹。")
+                return
+            }
+
+            guard confirmDeletingPartFolders(candidates) else {
+                logger.log(.info, event: "cleanup.part_folders.cancelled", details: ["folders": "\(candidates.count)"])
+                return
+            }
+
+            let deleted = try partFolderCleaner.deleteFolders(candidates)
+            logger.log(.info, event: "cleanup.part_folders.deleted", details: [
+                "root": rootURL.path,
+                "folders": "\(deleted)"
+            ])
+            showMessage(title: "清理完成", text: "已删除 \(deleted) 个包含 .mp4.part 文件的文件夹。")
+            loadRoot(rootURL)
+        } catch {
+            logger.log(.error, event: "cleanup.part_folders.failed", details: [
+                "root": rootURL.path,
+                "error": error.localizedDescription
+            ])
+            showError(error)
+        }
+    }
+
+    private func confirmDeletingPartFolders(_ candidates: [PartFolderCandidate]) -> Bool {
+        let preview = candidates
+            .prefix(8)
+            .map { "• \($0.folderURL.path)" }
+            .joined(separator: "\n")
+        let suffix = candidates.count > 8 ? "\n… 还有 \(candidates.count - 8) 个文件夹" : ""
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "确认删除 \(candidates.count) 个文件夹？"
+        alert.informativeText = "这些文件夹包含 .mp4.part 未完成下载文件，删除会递归移除整个文件夹，不能通过应用撤销。\n\n\(preview)\(suffix)"
+        alert.addButton(withTitle: "删除")
+        alert.addButton(withTitle: "取消")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
     @objc private func deleteSourceOptionChanged() {
         logger.log(.info, event: "ui.delete_source_option_changed", details: [
             "enabled": "\(deleteSourceCheckbox.state == .on)"
@@ -353,6 +415,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         stopButton.isEnabled = active
         concurrencyPopup.isEnabled = !active
         deleteSourceCheckbox.isEnabled = !active
+        cleanPartFoldersButton.isEnabled = !active
     }
 
     private func refresh() {
