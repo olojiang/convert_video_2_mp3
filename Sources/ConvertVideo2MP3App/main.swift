@@ -446,6 +446,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             tableColumn(id: "file")?.title = "视频文件"
             tableColumn(id: "file")?.width = 330
             tableColumn(id: "status")?.title = "状态"
+            tableColumn(id: "progress")?.isHidden = false
             tableColumn(id: "progress")?.title = "进度"
             tableColumn(id: "videoSize")?.title = "视频大小"
             tableColumn(id: "mp3Size")?.isHidden = false
@@ -462,6 +463,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             tableColumn(id: "file")?.title = "MP3 文件"
             tableColumn(id: "file")?.width = 420
             tableColumn(id: "status")?.title = "播放"
+            tableColumn(id: "progress")?.isHidden = true
             tableColumn(id: "progress")?.title = "位置"
             tableColumn(id: "videoSize")?.title = "大小"
             tableColumn(id: "mp3Size")?.isHidden = true
