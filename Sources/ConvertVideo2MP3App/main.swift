@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import ConvertCore
 import Foundation
 
@@ -17,6 +18,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        windowController?.persistSession()
     }
 }
 
@@ -65,8 +70,14 @@ final class KeyHandlingTableView: NSTableView {
     }
 }
 
-final class MainWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {
+private enum AppMode {
+    case conversion
+    case mp3Playback
+}
+
+final class MainWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, AVAudioPlayerDelegate {
     private let scanner = VideoScanner()
+    private let mp3Scanner = MP3Scanner()
     private let partFolderCleaner = PartFolderCleaner()
     private let fileSizeReader = FileSizeReader()
     private let taskSorter = ConversionTaskSorter()
@@ -77,9 +88,16 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private var coordinator: ConversionCoordinator?
     private var rootURL: URL?
     private var tasks: [ConversionTask] = []
+    private var mp3Tracks: [MP3Track] = []
     private var selectedIDs = Set<String>()
     private var isConverting = false
+    private var appMode: AppMode = .conversion
     private var sortPreference = ConversionTaskSortOption()
+    private var playbackStateStore: MP3PlaybackStateStore?
+    private var restoredPlaybackPosition: MP3PlaybackPosition?
+    private var audioPlayer: AVAudioPlayer?
+    private var currentTrackID: String?
+    private var playbackTimer: Timer?
 
     private let rootLabel = NSTextField(labelWithString: "未选择目录")
     private let summaryLabel = NSTextField(labelWithString: "请选择一个根目录开始扫描")
@@ -88,6 +106,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private let scrollView = NSScrollView()
     private let chooseButton = NSButton(title: "选择目录", target: nil, action: nil)
     private let rescanButton = NSButton(title: "重新扫描", target: nil, action: nil)
+    private let modeControl = NSSegmentedControl(labels: ["转换模式", "MP3 播放"], trackingMode: .selectOne, target: nil, action: nil)
     private let selectAllButton = NSButton(title: "全选", target: nil, action: nil)
     private let selectNoneButton = NSButton(title: "清空选择", target: nil, action: nil)
     private let startButton = NSButton(title: "开始转 MP3", target: nil, action: nil)
@@ -97,6 +116,13 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private let shortcutHelpButton = NSButton()
     private let deleteSourceCheckbox = NSButton(checkboxWithTitle: "成功后删除源视频", target: nil, action: nil)
     private let concurrencyPopup = NSPopUpButton()
+    private let previousTrackButton = NSButton(title: "上一首", target: nil, action: nil)
+    private let rewind30Button = NSButton(title: "-30s", target: nil, action: nil)
+    private let rewind5Button = NSButton(title: "-5s", target: nil, action: nil)
+    private let playPauseButton = NSButton(title: "播放", target: nil, action: nil)
+    private let forward5Button = NSButton(title: "+5s", target: nil, action: nil)
+    private let forward30Button = NSButton(title: "+30s", target: nil, action: nil)
+    private let nextTrackButton = NSButton(title: "下一首", target: nil, action: nil)
     private let progressIndicator = NSProgressIndicator()
 
     init() {
@@ -144,6 +170,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         let toolbar = NSStackView(views: [
             chooseButton,
             rescanButton,
+            modeControl,
             selectAllButton,
             selectNoneButton,
             concurrencyPopup,
@@ -151,6 +178,13 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             startButton,
             stopButton,
             cleanPartFoldersButton,
+            previousTrackButton,
+            rewind30Button,
+            rewind5Button,
+            playPauseButton,
+            forward5Button,
+            forward30Button,
+            nextTrackButton,
             revealLogsButton,
             shortcutHelpButton
         ])
@@ -161,6 +195,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
         concurrencyPopup.addItems(withTitles: ["并发 4", "并发 6", "并发 8"])
         concurrencyPopup.selectItem(withTitle: "并发 4")
+        modeControl.selectedSegment = 0
         stopButton.isEnabled = false
 
         rootLabel.lineBreakMode = .byTruncatingMiddle
@@ -176,12 +211,19 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         tableView.autosaveName = "conversionTasksTable"
         tableView.autosaveTableColumns = true
         tableView.onSpace = { [weak self] controlPressed in
-            self?.playFocusedRow(openMP3: controlPressed)
+            guard let self else { return }
+            if self.appMode == .mp3Playback {
+                self.playFocusedMP3OrToggle()
+            } else {
+                self.playFocusedRow(openMP3: controlPressed)
+            }
         }
         tableView.onCommandBackspace = { [weak self] in
+            guard self?.appMode == .conversion else { return }
             self?.deleteFocusedTaskFolder()
         }
         tableView.onShiftCommandBackspace = { [weak self] in
+            guard self?.appMode == .conversion else { return }
             self?.deleteFocusedSourceVideo()
         }
         tableView.allowsMultipleSelection = true
@@ -195,6 +237,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         addColumn(id: "output", title: "输出 MP3", width: 310)
         configureSortableColumns()
         applySortPreferenceToTableHeader()
+        configureColumnsForMode()
 
         scrollView.documentView = tableView
         scrollView.hasVerticalScroller = true
@@ -226,6 +269,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         chooseButton.action = #selector(chooseRoot)
         rescanButton.target = self
         rescanButton.action = #selector(rescan)
+        modeControl.target = self
+        modeControl.action = #selector(modeChanged)
         selectAllButton.target = self
         selectAllButton.action = #selector(selectAllTasks)
         selectNoneButton.target = self
@@ -238,9 +283,24 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         revealLogsButton.action = #selector(revealLogs)
         cleanPartFoldersButton.target = self
         cleanPartFoldersButton.action = #selector(cleanPartFolders)
+        previousTrackButton.target = self
+        previousTrackButton.action = #selector(playPreviousTrack)
+        rewind30Button.target = self
+        rewind30Button.action = #selector(rewind30Seconds)
+        rewind5Button.target = self
+        rewind5Button.action = #selector(rewind5Seconds)
+        playPauseButton.target = self
+        playPauseButton.action = #selector(toggleMP3Playback)
+        forward5Button.target = self
+        forward5Button.action = #selector(forward5Seconds)
+        forward30Button.target = self
+        forward30Button.action = #selector(forward30Seconds)
+        nextTrackButton.target = self
+        nextTrackButton.action = #selector(playNextTrack)
         deleteSourceCheckbox.target = self
         deleteSourceCheckbox.action = #selector(deleteSourceOptionChanged)
         configureShortcutHelpButton()
+        configureControlsForMode()
 
         logLabel.stringValue = "日志文件：\(logger.logURL.path)"
     }
@@ -274,6 +334,73 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         tableView.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier(id))
     }
 
+    private func configureColumnsForMode() {
+        switch appMode {
+        case .conversion:
+            configureSortableColumns()
+            applySortPreferenceToTableHeader()
+            tableColumn(id: "selected")?.isHidden = false
+            tableColumn(id: "file")?.title = "视频文件"
+            tableColumn(id: "file")?.width = 330
+            tableColumn(id: "status")?.title = "状态"
+            tableColumn(id: "progress")?.title = "进度"
+            tableColumn(id: "videoSize")?.title = "视频大小"
+            tableColumn(id: "mp3Size")?.isHidden = false
+            tableColumn(id: "mp3Size")?.title = "MP3大小"
+            tableColumn(id: "output")?.title = "输出 MP3"
+            tableColumn(id: "output")?.width = 310
+        case .mp3Playback:
+            tableView.sortDescriptors = []
+            for column in tableView.tableColumns {
+                column.sortDescriptorPrototype = nil
+            }
+            tableColumn(id: "selected")?.isHidden = true
+            tableColumn(id: "file")?.title = "MP3 文件"
+            tableColumn(id: "file")?.width = 420
+            tableColumn(id: "status")?.title = "播放"
+            tableColumn(id: "progress")?.title = "位置"
+            tableColumn(id: "videoSize")?.title = "大小"
+            tableColumn(id: "mp3Size")?.isHidden = true
+            tableColumn(id: "output")?.title = "路径"
+            tableColumn(id: "output")?.width = 430
+        }
+    }
+
+    private func configureControlsForMode() {
+        let conversionMode = appMode == .conversion
+        selectAllButton.isHidden = !conversionMode
+        selectNoneButton.isHidden = !conversionMode
+        concurrencyPopup.isHidden = !conversionMode
+        deleteSourceCheckbox.isHidden = !conversionMode
+        startButton.isHidden = !conversionMode
+        stopButton.isHidden = !conversionMode
+        cleanPartFoldersButton.isHidden = !conversionMode
+
+        previousTrackButton.isHidden = conversionMode
+        rewind30Button.isHidden = conversionMode
+        rewind5Button.isHidden = conversionMode
+        playPauseButton.isHidden = conversionMode
+        forward5Button.isHidden = conversionMode
+        forward30Button.isHidden = conversionMode
+        nextTrackButton.isHidden = conversionMode
+
+        if conversionMode {
+            setControlsForConversion(active: isConverting)
+        } else {
+            chooseButton.isEnabled = true
+            rescanButton.isEnabled = rootURL != nil
+            modeControl.isEnabled = true
+            let hasTracks = !mp3Tracks.isEmpty
+            previousTrackButton.isEnabled = hasTracks
+            rewind30Button.isEnabled = hasTracks
+            rewind5Button.isEnabled = hasTracks
+            playPauseButton.isEnabled = hasTracks
+            forward5Button.isEnabled = hasTracks
+            forward30Button.isEnabled = hasTracks
+            nextTrackButton.isEnabled = hasTracks
+        }
+    }
+
     private func configureShortcutHelpButton() {
         shortcutHelpButton.title = ""
         shortcutHelpButton.bezelStyle = .texturedRounded
@@ -282,6 +409,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         shortcutHelpButton.toolTip = """
         Space：播放选中行的视频
         Ctrl+Space：播放选中行的 MP3
+        MP3 播放模式 Space：播放/暂停或播放选中 MP3
         Shift+Cmd+Backspace：确认后仅删除选中源视频
         Cmd+Backspace：确认后删除选中视频所在文件夹
         """
@@ -317,8 +445,23 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         loadRoot(rootURL)
     }
 
+    @objc private func modeChanged() {
+        saveCurrentPlaybackPosition()
+        appMode = modeControl.selectedSegment == 1 ? .mp3Playback : .conversion
+        if appMode == .conversion {
+            stopMP3Playback()
+        } else {
+            coordinator?.requestStop()
+        }
+        configureColumnsForMode()
+        configureControlsForMode()
+        refresh()
+    }
+
     private func loadRoot(_ url: URL) {
         do {
+            saveCurrentPlaybackPosition()
+            stopMP3Playback()
             logger.log(.info, event: "scan.started", details: ["root": url.path])
             rootURL = url
             historyStore.remember(url)
@@ -326,8 +469,11 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
             let appStateURL = AppPaths.stateURL(for: url)
             stateStore = TaskStateStore(stateURL: appStateURL)
+            playbackStateStore = MP3PlaybackStateStore(stateURL: AppPaths.mp3PlaybackStateURL(for: url))
             let videos = try scanner.scan(root: url)
             tasks = try stateStore?.load(for: videos) ?? []
+            mp3Tracks = try mp3Scanner.scan(root: url)
+            restoredPlaybackPosition = try playbackStateStore?.load(for: mp3Tracks)
             applySort()
             selectedIDs = Set(tasks.filter { $0.status != .succeeded }.map(\.id))
             try stateStore?.save(tasks)
@@ -335,8 +481,10 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             logger.log(.info, event: "scan.finished", details: [
                 "root": url.path,
                 "videos": "\(tasks.count)",
+                "mp3_tracks": "\(mp3Tracks.count)",
                 "selected": "\(selectedIDs.count)"
             ])
+            configureControlsForMode()
             refresh()
         } catch {
             logger.log(.error, event: "scan.failed", details: ["error": error.localizedDescription])
@@ -609,6 +757,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private func setControlsForConversion(active: Bool) {
         chooseButton.isEnabled = !active
         rescanButton.isEnabled = !active
+        modeControl.isEnabled = !active
         startButton.isEnabled = !active
         stopButton.isEnabled = active
         concurrencyPopup.isEnabled = !active
@@ -618,6 +767,12 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
     private func refresh() {
         tableView.reloadData()
+        configureControlsForMode()
+        guard appMode == .conversion else {
+            refreshMP3Summary()
+            return
+        }
+
         let succeeded = tasks.filter { $0.status == .succeeded }.count
         let failed = tasks.filter { $0.status == .failed }.count
         let cancelled = tasks.filter { $0.status == .cancelled }.count
@@ -625,6 +780,33 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         let sizeSummary = fileSizeReader.summary(for: tasks)
         summaryLabel.stringValue = "共 \(tasks.count) 个视频，已选择 \(selectedIDs.count)，成功 \(succeeded)，失败 \(failed)，取消 \(cancelled)，总进度 \(Int(totalProgress * 100))%，视频总大小 \(FileSizeText.format(sizeSummary.videoBytes))，MP3总大小 \(FileSizeText.format(sizeSummary.mp3Bytes))"
         progressIndicator.doubleValue = totalProgress
+    }
+
+    private func refreshMP3Summary() {
+        let totalBytes = mp3Tracks.reduce(Int64(0)) { partial, track in
+            partial + (fileSizeReader.sizeOfFile(at: track.url) ?? 0)
+        }
+
+        let currentText: String
+        if let index = currentMP3Index(), index < mp3Tracks.count {
+            let track = mp3Tracks[index]
+            let time = audioPlayer?.currentTime ?? restoredPlaybackPosition?.time ?? 0
+            let duration = audioPlayer?.duration
+            currentText = "，当前 \(index + 1)/\(mp3Tracks.count)：\(track.url.lastPathComponent) \(formatPlaybackTime(time, duration: duration))"
+        } else if let restoredPlaybackPosition,
+                  let index = mp3Tracks.firstIndex(where: { $0.id == restoredPlaybackPosition.trackID }) {
+            currentText = "，已记住 \(index + 1)/\(mp3Tracks.count)：\(formatPlaybackTime(restoredPlaybackPosition.time, duration: nil))"
+        } else {
+            currentText = ""
+        }
+
+        summaryLabel.stringValue = "共 \(mp3Tracks.count) 个 MP3，大小 \(FileSizeText.format(totalBytes))\(currentText)"
+        progressIndicator.doubleValue = mp3PlaybackProgress()
+    }
+
+    private func mp3PlaybackProgress() -> Double {
+        guard let player = audioPlayer, player.duration > 0 else { return 0 }
+        return min(max(player.currentTime / player.duration, 0), 1)
     }
 
     private func applySort() {
@@ -679,12 +861,223 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         NSWorkspace.shared.open(task.sourceURL)
     }
 
+    func persistSession() {
+        saveCurrentPlaybackPosition()
+    }
+
+    private func playFocusedMP3OrToggle() {
+        let row = tableView.selectedRow
+        if row >= 0, row < mp3Tracks.count {
+            let track = mp3Tracks[row]
+            if currentTrackID == track.id {
+                toggleMP3Playback()
+            } else {
+                playMP3(at: row, resumeSavedPosition: true)
+            }
+            return
+        }
+
+        toggleMP3Playback()
+    }
+
+    @objc private func toggleMP3Playback() {
+        guard appMode == .mp3Playback else { return }
+
+        if let player = audioPlayer {
+            if player.isPlaying {
+                player.pause()
+                stopPlaybackTimer()
+                saveCurrentPlaybackPosition()
+            } else {
+                player.play()
+                startPlaybackTimer()
+            }
+            refresh()
+            return
+        }
+
+        if let restoredPlaybackPosition,
+           let index = mp3Tracks.firstIndex(where: { $0.id == restoredPlaybackPosition.trackID }) {
+            playMP3(at: index, resumeSavedPosition: true)
+            return
+        }
+
+        let selectedRow = tableView.selectedRow
+        if selectedRow >= 0, selectedRow < mp3Tracks.count {
+            playMP3(at: selectedRow, resumeSavedPosition: true)
+        } else if !mp3Tracks.isEmpty {
+            playMP3(at: 0, resumeSavedPosition: true)
+        }
+    }
+
+    @objc private func playPreviousTrack() {
+        guard let index = currentMP3Index(), index > 0 else { return }
+        saveCurrentPlaybackPosition()
+        playMP3(at: index - 1, resumeSavedPosition: false)
+    }
+
+    @objc private func playNextTrack() {
+        advanceToNextTrack(automatic: false)
+    }
+
+    private func advanceToNextTrack(automatic: Bool) {
+        guard let index = currentMP3Index() else { return }
+        let nextIndex = index + 1
+        guard nextIndex < mp3Tracks.count else {
+            if automatic {
+                saveCurrentPlaybackPosition(time: 0)
+                stopMP3Playback(clearCurrentTrack: false)
+            }
+            return
+        }
+        saveCurrentPlaybackPosition()
+        playMP3(at: nextIndex, resumeSavedPosition: false)
+    }
+
+    @objc private func rewind30Seconds() {
+        seekMP3(by: -30)
+    }
+
+    @objc private func rewind5Seconds() {
+        seekMP3(by: -5)
+    }
+
+    @objc private func forward5Seconds() {
+        seekMP3(by: 5)
+    }
+
+    @objc private func forward30Seconds() {
+        seekMP3(by: 30)
+    }
+
+    private func playMP3(at index: Int, resumeSavedPosition: Bool) {
+        guard index >= 0, index < mp3Tracks.count else { return }
+        let track = mp3Tracks[index]
+
+        do {
+            stopPlaybackTimer()
+            audioPlayer?.stop()
+            let player = try AVAudioPlayer(contentsOf: track.url)
+            player.delegate = self
+            if resumeSavedPosition,
+               restoredPlaybackPosition?.trackID == track.id,
+               let time = restoredPlaybackPosition?.time {
+                player.currentTime = min(max(0, time), max(0, player.duration - 1))
+            }
+            player.prepareToPlay()
+            player.play()
+
+            audioPlayer = player
+            currentTrackID = track.id
+            restoredPlaybackPosition = MP3PlaybackPosition(trackID: track.id, time: player.currentTime)
+            tableView.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+            tableView.scrollRowToVisible(index)
+            startPlaybackTimer()
+            saveCurrentPlaybackPosition()
+            logger.log(.info, event: "mp3.playback_started", details: [
+                "track": track.url.path,
+                "time": "\(Int(player.currentTime))"
+            ])
+            refresh()
+        } catch {
+            logger.log(.error, event: "mp3.playback_failed", details: [
+                "track": track.url.path,
+                "error": error.localizedDescription
+            ])
+            showError(error)
+        }
+    }
+
+    private func seekMP3(by seconds: TimeInterval) {
+        guard let player = audioPlayer else {
+            toggleMP3Playback()
+            return
+        }
+        player.currentTime = min(max(0, player.currentTime + seconds), player.duration)
+        saveCurrentPlaybackPosition()
+        refresh()
+    }
+
+    private func currentMP3Index() -> Int? {
+        if let currentTrackID,
+           let index = mp3Tracks.firstIndex(where: { $0.id == currentTrackID }) {
+            return index
+        }
+
+        let selectedRow = tableView.selectedRow
+        if selectedRow >= 0, selectedRow < mp3Tracks.count {
+            return selectedRow
+        }
+
+        if let restoredPlaybackPosition {
+            return mp3Tracks.firstIndex(where: { $0.id == restoredPlaybackPosition.trackID })
+        }
+
+        return nil
+    }
+
+    private func saveCurrentPlaybackPosition(time explicitTime: TimeInterval? = nil) {
+        let trackID = currentTrackID ?? restoredPlaybackPosition?.trackID
+        guard let trackID else { return }
+
+        let time = explicitTime ?? audioPlayer?.currentTime ?? restoredPlaybackPosition?.time ?? 0
+        let position = MP3PlaybackPosition(trackID: trackID, time: time)
+        restoredPlaybackPosition = position
+        try? playbackStateStore?.save(position)
+    }
+
+    private func stopMP3Playback(clearCurrentTrack: Bool = true) {
+        stopPlaybackTimer()
+        audioPlayer?.stop()
+        audioPlayer = nil
+        if clearCurrentTrack {
+            currentTrackID = nil
+        }
+        playPauseButton.title = "播放"
+    }
+
+    private func startPlaybackTimer() {
+        stopPlaybackTimer()
+        playbackTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.saveCurrentPlaybackPosition()
+            self.refresh()
+        }
+        playPauseButton.title = "暂停"
+    }
+
+    private func stopPlaybackTimer() {
+        playbackTimer?.invalidate()
+        playbackTimer = nil
+        playPauseButton.title = audioPlayer?.isPlaying == true ? "暂停" : "播放"
+    }
+
+    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        Task { @MainActor in
+            self.advanceToNextTrack(automatic: true)
+        }
+    }
+
     func numberOfRows(in tableView: NSTableView) -> Int {
-        tasks.count
+        switch appMode {
+        case .conversion: return tasks.count
+        case .mp3Playback: return mp3Tracks.count
+        }
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard row < tasks.count, let id = tableColumn?.identifier.rawValue else { return nil }
+        guard let id = tableColumn?.identifier.rawValue else { return nil }
+        if appMode == .mp3Playback {
+            guard row < mp3Tracks.count else { return nil }
+            let text = NSTextField(labelWithString: value(for: id, track: mp3Tracks[row]))
+            text.lineBreakMode = .byTruncatingMiddle
+            if id == "status" {
+                text.textColor = mp3StatusColor(for: mp3Tracks[row])
+            }
+            return text
+        }
+
+        guard row < tasks.count else { return nil }
         let task = tasks[row]
 
         if id == "selected" {
@@ -704,6 +1097,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     }
 
     func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
+        guard appMode == .conversion else { return }
         guard let descriptor = tableView.sortDescriptors.first,
               let key = descriptor.key,
               let column = sortColumn(for: key) else {
@@ -750,6 +1144,55 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         }
     }
 
+    private func value(for column: String, track: MP3Track) -> String {
+        switch column {
+        case "file": return track.url.lastPathComponent
+        case "status": return mp3StatusText(for: track)
+        case "progress":
+            guard currentTrackID == track.id else {
+                if restoredPlaybackPosition?.trackID == track.id {
+                    return formatPlaybackTime(restoredPlaybackPosition?.time ?? 0, duration: nil)
+                }
+                return ""
+            }
+            return formatPlaybackTime(audioPlayer?.currentTime ?? 0, duration: audioPlayer?.duration)
+        case "videoSize": return FileSizeText.format(fileSizeReader.sizeOfFile(at: track.url))
+        case "output": return track.url.path
+        default: return ""
+        }
+    }
+
+    private func mp3StatusText(for track: MP3Track) -> String {
+        guard currentTrackID == track.id else {
+            return restoredPlaybackPosition?.trackID == track.id ? "已记住" : ""
+        }
+
+        if audioPlayer?.isPlaying == true {
+            return "播放中"
+        }
+        return "已暂停"
+    }
+
+    private func mp3StatusColor(for track: MP3Track) -> NSColor {
+        guard currentTrackID == track.id || restoredPlaybackPosition?.trackID == track.id else {
+            return .labelColor
+        }
+        return audioPlayer?.isPlaying == true ? .systemBlue : .systemOrange
+    }
+
+    private func formatPlaybackTime(_ time: TimeInterval, duration: TimeInterval?) -> String {
+        let current = formatClock(time)
+        guard let duration, duration.isFinite, duration > 0 else { return current }
+        return "\(current)/\(formatClock(duration))"
+    }
+
+    private func formatClock(_ time: TimeInterval) -> String {
+        let totalSeconds = max(0, Int(time.rounded(.down)))
+        let minutes = totalSeconds / 60
+        let seconds = totalSeconds % 60
+        return String(format: "%d:%02d", minutes, seconds)
+    }
+
     private func statusText(_ task: ConversionTask) -> String {
         switch task.status {
         case .pending: return "待处理"
@@ -790,6 +1233,13 @@ enum AppPaths {
         let hash = String(root.path.hashValue).replacingOccurrences(of: "-", with: "n")
         return supportDirectory()
             .appendingPathComponent("state", isDirectory: true)
+            .appendingPathComponent("\(hash).json")
+    }
+
+    static func mp3PlaybackStateURL(for root: URL) -> URL {
+        let hash = String(root.path.hashValue).replacingOccurrences(of: "-", with: "n")
+        return supportDirectory()
+            .appendingPathComponent("mp3-playback", isDirectory: true)
             .appendingPathComponent("\(hash).json")
     }
 }
