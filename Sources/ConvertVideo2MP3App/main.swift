@@ -52,6 +52,7 @@ final class KeyHandlingTableView: NSTableView {
 final class MainWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {
     private let scanner = VideoScanner()
     private let partFolderCleaner = PartFolderCleaner()
+    private let fileSizeReader = FileSizeReader()
     private let historyStore = RootHistoryStore()
     private let logger: FileEventLogger
     private var stateStore: TaskStateStore?
@@ -83,13 +84,13 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         logger.log(.info, event: "app.window_initializing", details: [:])
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1040, height: 680),
+            contentRect: NSRect(x: 0, y: 0, width: 1240, height: 720),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "Convert Video 2 MP3"
-        window.minSize = NSSize(width: 880, height: 540)
+        window.minSize = NSSize(width: 1040, height: 560)
         super.init(window: window)
         setupUI()
         restoreLastRootIfPossible()
@@ -156,10 +157,12 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         tableView.allowsMultipleSelection = true
         tableView.usesAlternatingRowBackgroundColors = true
         addColumn(id: "selected", title: "选择", width: 62)
-        addColumn(id: "file", title: "视频文件", width: 360)
+        addColumn(id: "file", title: "视频文件", width: 330)
         addColumn(id: "status", title: "状态", width: 110)
         addColumn(id: "progress", title: "进度", width: 80)
-        addColumn(id: "output", title: "输出 MP3", width: 330)
+        addColumn(id: "videoSize", title: "视频大小", width: 100)
+        addColumn(id: "mp3Size", title: "MP3大小", width: 100)
+        addColumn(id: "output", title: "输出 MP3", width: 310)
 
         scrollView.documentView = tableView
         scrollView.hasVerticalScroller = true
@@ -424,7 +427,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         let failed = tasks.filter { $0.status == .failed }.count
         let cancelled = tasks.filter { $0.status == .cancelled }.count
         let totalProgress = overallProgress()
-        summaryLabel.stringValue = "共 \(tasks.count) 个视频，已选择 \(selectedIDs.count)，成功 \(succeeded)，失败 \(failed)，取消 \(cancelled)，总进度 \(Int(totalProgress * 100))%"
+        let sizeSummary = fileSizeReader.summary(for: tasks)
+        summaryLabel.stringValue = "共 \(tasks.count) 个视频，已选择 \(selectedIDs.count)，成功 \(succeeded)，失败 \(failed)，取消 \(cancelled)，总进度 \(Int(totalProgress * 100))%，视频总大小 \(FileSizeText.format(sizeSummary.videoBytes))，MP3总大小 \(FileSizeText.format(sizeSummary.mp3Bytes))"
         progressIndicator.doubleValue = totalProgress
     }
 
@@ -515,6 +519,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         case "file": return task.sourceURL.path
         case "status": return statusText(task)
         case "progress": return "\(Int(task.progress * 100))%"
+        case "videoSize": return FileSizeText.format(fileSizeReader.sizeOfFile(at: task.sourceURL))
+        case "mp3Size": return FileSizeText.format(fileSizeReader.sizeOfFile(at: task.outputURL))
         case "output": return task.outputURL.path
         default: return ""
         }
