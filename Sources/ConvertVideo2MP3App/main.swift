@@ -70,6 +70,41 @@ final class KeyHandlingTableView: NSTableView {
     }
 }
 
+final class SeekableProgressIndicator: NSProgressIndicator {
+    var isSeekEnabled = false
+    var onSeekRatio: ((Double) -> Void)?
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        if isSeekEnabled {
+            addCursorRect(bounds, cursor: .pointingHand)
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard isSeekEnabled else {
+            super.mouseDown(with: event)
+            return
+        }
+        seek(to: event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard isSeekEnabled else {
+            super.mouseDragged(with: event)
+            return
+        }
+        seek(to: event)
+    }
+
+    private func seek(to event: NSEvent) {
+        guard bounds.width > 0 else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        let ratio = min(max(point.x / bounds.width, 0), 1)
+        onSeekRatio?(Double(ratio))
+    }
+}
+
 private enum AppMode: String, Codable {
     case conversion
     case mp3Playback
@@ -127,7 +162,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private let forward5Button = NSButton(title: "+5s", target: nil, action: nil)
     private let forward30Button = NSButton(title: "+30s", target: nil, action: nil)
     private let nextTrackButton = NSButton(title: "下一首", target: nil, action: nil)
-    private let progressIndicator = NSProgressIndicator()
+    private let progressIndicator = SeekableProgressIndicator()
 
     init() {
         logger = Self.makeLogger()
@@ -211,6 +246,9 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         progressIndicator.isIndeterminate = false
         progressIndicator.minValue = 0
         progressIndicator.maxValue = 1
+        progressIndicator.onSeekRatio = { [weak self] ratio in
+            self?.seekMP3(toProgress: ratio)
+        }
 
         tableView.dataSource = self
         tableView.delegate = self
@@ -422,6 +460,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             forward30Button.isEnabled = hasTracks
             nextTrackButton.isEnabled = hasTracks
         }
+        updateProgressSeekability()
     }
 
     private func configureShortcutHelpButton() {
@@ -788,6 +827,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         concurrencyPopup.isEnabled = !active
         deleteSourceCheckbox.isEnabled = !active
         cleanPartFoldersButton.isEnabled = !active
+        updateProgressSeekability()
     }
 
     private func refresh() {
@@ -1030,6 +1070,27 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         refresh()
     }
 
+    private func seekMP3(toProgress progress: Double) {
+        guard appMode == .mp3Playback,
+              let player = audioPlayer,
+              player.duration.isFinite,
+              player.duration > 0 else {
+            return
+        }
+        player.currentTime = min(max(0, progress), 1) * player.duration
+        saveCurrentPlaybackPosition()
+        refresh()
+    }
+
+    private func updateProgressSeekability() {
+        let canSeek = appMode == .mp3Playback
+            && audioPlayer?.duration.isFinite == true
+            && (audioPlayer?.duration ?? 0) > 0
+        guard progressIndicator.isSeekEnabled != canSeek else { return }
+        progressIndicator.isSeekEnabled = canSeek
+        progressIndicator.window?.invalidateCursorRects(for: progressIndicator)
+    }
+
     private func currentMP3Index() -> Int? {
         if let currentTrackID,
            let index = mp3Tracks.firstIndex(where: { $0.id == currentTrackID }) {
@@ -1066,6 +1127,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             currentTrackID = nil
         }
         playPauseButton.title = "播放"
+        updateProgressSeekability()
     }
 
     private func startPlaybackTimer() {
@@ -1076,6 +1138,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             self.refresh()
         }
         playPauseButton.title = "暂停"
+        updateProgressSeekability()
     }
 
     private func stopPlaybackTimer() {
