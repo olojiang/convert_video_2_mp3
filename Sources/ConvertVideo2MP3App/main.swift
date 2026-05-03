@@ -162,6 +162,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private var audioPlayer: AVAudioPlayer?
     private var currentTrackID: String?
     private var playbackTimer: Timer?
+    private var lastPeriodicPlaybackSave = Date.distantPast
 
     private let rootLabel = NSTextField(labelWithString: "未选择目录")
     private let summaryLabel = NSTextField(labelWithString: "请选择一个根目录开始扫描")
@@ -1184,6 +1185,12 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         let position = MP3PlaybackPosition(trackID: trackID, time: time)
         restoredPlaybackPosition = position
         try? playbackStateStore?.save(position)
+        lastPeriodicPlaybackSave = Date()
+    }
+
+    private func saveCurrentPlaybackPositionIfNeeded() {
+        guard Date().timeIntervalSince(lastPeriodicPlaybackSave) >= 5 else { return }
+        saveCurrentPlaybackPosition()
     }
 
     private func stopMP3Playback(clearCurrentTrack: Bool = true) {
@@ -1201,7 +1208,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         stopPlaybackTimer()
         playbackTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             guard let self else { return }
-            self.saveCurrentPlaybackPosition()
+            self.saveCurrentPlaybackPositionIfNeeded()
             self.refresh(reloadTable: false)
         }
         playPauseButton.title = "暂停"
@@ -1420,17 +1427,26 @@ enum AppPaths {
     }
 
     static func stateURL(for root: URL) -> URL {
-        let hash = String(root.path.hashValue).replacingOccurrences(of: "-", with: "n")
+        let hash = stablePathID(for: root)
         return supportDirectory()
             .appendingPathComponent("state", isDirectory: true)
             .appendingPathComponent("\(hash).json")
     }
 
     static func mp3PlaybackStateURL(for root: URL) -> URL {
-        let hash = String(root.path.hashValue).replacingOccurrences(of: "-", with: "n")
+        let hash = stablePathID(for: root)
         return supportDirectory()
             .appendingPathComponent("mp3-playback", isDirectory: true)
             .appendingPathComponent("\(hash).json")
+    }
+
+    private static func stablePathID(for url: URL) -> String {
+        var hash: UInt64 = 0xcbf29ce484222325
+        for byte in url.standardizedFileURL.path.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 0x100000001b3
+        }
+        return String(format: "%016llx", hash)
     }
 }
 
