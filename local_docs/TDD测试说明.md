@@ -16,6 +16,8 @@ flowchart LR
 - `VideoScannerTests`：递归发现视频，忽略非视频，并推导同目录同名 `mp3`。
 - `TaskStateStoreTests`：保存并恢复成功状态；即使没有状态文件，只要 `mp3` 已存在也标记为成功。
 - `ConversionCoordinatorTests`：并发数不超过配置；停止后不会继续启动所有待处理任务。
+- `ConversionCoordinatorTests`：勾选成功后删除源视频时，成功转换后会删除源文件。
+- `ConversionCoordinatorTests`：转换过程中 extractor 上报的进度会同步到任务更新。
 - `FileLoggerTests`：日志落盘并包含事件、状态、源文件等排查字段。
 
 ## 验证命令

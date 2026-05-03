@@ -28,7 +28,8 @@ public protocol AudioExtracting: AnyObject {
         source: URL,
         tempOutput: URL,
         finalOutput: URL,
-        cancellation: CancellationChecking
+        cancellation: CancellationChecking,
+        progress: @escaping (Double) -> Void
     ) async throws
 }
 
@@ -53,7 +54,11 @@ public final class ConversionCoordinator {
         cancellation.requestCancel()
     }
 
-    public func convert(tasks: [ConversionTask], concurrency: Int) async -> [ConversionTask] {
+    public func convert(
+        tasks: [ConversionTask],
+        concurrency: Int,
+        options: ConversionOptions = ConversionOptions()
+    ) async -> [ConversionTask] {
         let limit = max(1, min(concurrency, 16))
         var results = tasks
         var nextIndex = 0
@@ -61,7 +66,8 @@ public final class ConversionCoordinator {
 
         logger.log(.info, event: "conversion.batch_started", details: [
             "total": "\(tasks.count)",
-            "concurrency": "\(limit)"
+            "concurrency": "\(limit)",
+            "delete_source_on_success": "\(options.deleteSourceOnSuccess)"
         ])
 
         await withTaskGroup(of: (Int, ConversionTask).self) { group in
@@ -73,13 +79,13 @@ public final class ConversionCoordinator {
                     nextIndex += 1
                     activeCount += 1
                     group.addTask { [extractor, logger, cancellation, onTaskUpdate] in
-                        var task = tasks[index]
                         return await Self.convertOne(
                             index: index,
-                            task: &task,
+                            task: tasks[index],
                             extractor: extractor,
                             logger: logger,
                             onTaskUpdate: onTaskUpdate,
+                            options: options,
                             cancellation: cancellation
                         )
                     }
@@ -113,14 +119,17 @@ public final class ConversionCoordinator {
 
     private static func convertOne(
         index: Int,
-        task: inout ConversionTask,
+        task originalTask: ConversionTask,
         extractor: AudioExtracting,
         logger: EventLogger,
-        onTaskUpdate: (ConversionTask) -> Void,
+        onTaskUpdate: @escaping (ConversionTask) -> Void,
+        options: ConversionOptions,
         cancellation: CancellationChecking
     ) async -> (Int, ConversionTask) {
+        var task = originalTask
         if cancellation.isCancellationRequested {
             task.status = .cancelled
+            task.progress = 0
             task.updatedAt = Date()
             onTaskUpdate(task)
             return (index, task)
@@ -132,6 +141,7 @@ public final class ConversionCoordinator {
 
         if FileManager.default.fileExists(atPath: task.outputURL.path) {
             task.status = .succeeded
+            task.progress = 1
             task.errorMessage = nil
             task.updatedAt = Date()
             logger.log(.info, event: "conversion.skipped_existing_output", details: [
@@ -144,6 +154,7 @@ public final class ConversionCoordinator {
         }
 
         task.status = .converting
+        task.progress = 0
         task.errorMessage = nil
         task.updatedAt = Date()
         onTaskUpdate(task)
@@ -161,14 +172,34 @@ public final class ConversionCoordinator {
                 source: task.sourceURL,
                 tempOutput: tempOutput,
                 finalOutput: task.outputURL,
-                cancellation: cancellation
+                cancellation: cancellation,
+                progress: { fraction in
+                    task.progress = min(max(fraction, 0), 1)
+                    task.updatedAt = Date()
+                    logger.log(.debug, event: "conversion.progress", details: [
+                        "source": task.sourceURL.path,
+                        "output": task.outputURL.path,
+                        "progress": "\(Int(task.progress * 100))",
+                        "status": task.status.rawValue
+                    ])
+                    onTaskUpdate(task)
+                }
             )
             task.status = .succeeded
+            task.progress = 1
             task.updatedAt = Date()
+            if options.deleteSourceOnSuccess {
+                try FileManager.default.removeItem(at: task.sourceURL)
+                logger.log(.info, event: "conversion.source_deleted", details: [
+                    "source": task.sourceURL.path,
+                    "output": task.outputURL.path
+                ])
+            }
             logger.log(.info, event: "conversion.succeeded", details: [
                 "source": task.sourceURL.path,
                 "output": task.outputURL.path,
-                "status": task.status.rawValue
+                "status": task.status.rawValue,
+                "progress": "\(Int(task.progress * 100))"
             ])
             onTaskUpdate(task)
         } catch ConversionError.cancelled {

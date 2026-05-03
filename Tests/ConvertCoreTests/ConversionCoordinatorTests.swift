@@ -1,4 +1,5 @@
 import Testing
+import Foundation
 @testable import ConvertCore
 
 struct ConversionCoordinatorTests {
@@ -41,5 +42,45 @@ struct ConversionCoordinatorTests {
 
         #expect(extractor.startedCount < tasks.count)
         #expect(results.contains { $0.status == .cancelled || $0.status == .pending })
+    }
+
+    @Test func deletesSourceVideoWhenOptionIsEnabledAndConversionSucceeds() async throws {
+        let root = try TemporaryDirectory()
+        let source = root.url.appendingPathComponent("delete-me.mp4")
+        let output = root.url.appendingPathComponent("delete-me.mp3")
+        try "video".write(to: source, atomically: true, encoding: .utf8)
+        let task = ConversionTask(video: VideoFile(sourceURL: source, outputURL: output))
+
+        let coordinator = ConversionCoordinator(extractor: FakeAudioExtractor(delayNanoseconds: 1), logger: MemoryLogger())
+        let results = await coordinator.convert(
+            tasks: [task],
+            concurrency: 1,
+            options: ConversionOptions(deleteSourceOnSuccess: true)
+        )
+
+        #expect(results[0].status == .succeeded)
+        #expect(FileManager.default.fileExists(atPath: output.path))
+        #expect(!FileManager.default.fileExists(atPath: source.path))
+    }
+
+    @Test func publishesProgressUpdatesDuringConversion() async throws {
+        let root = try TemporaryDirectory()
+        let source = root.url.appendingPathComponent("progress.mov")
+        let output = root.url.appendingPathComponent("progress.mp3")
+        try "video".write(to: source, atomically: true, encoding: .utf8)
+        let task = ConversionTask(video: VideoFile(sourceURL: source, outputURL: output))
+        let extractor = FakeAudioExtractor(delayNanoseconds: 1, progressFractions: [0.5, 1.0])
+        let updates = ProgressRecorder()
+        let coordinator = ConversionCoordinator(
+            extractor: extractor,
+            logger: MemoryLogger(),
+            onTaskUpdate: { updates.record($0) }
+        )
+
+        let results = await coordinator.convert(tasks: [task], concurrency: 1)
+
+        #expect(results[0].progress == 1.0)
+        #expect(updates.progressValues.contains(0.5))
+        #expect(updates.progressValues.contains(1.0))
     }
 }

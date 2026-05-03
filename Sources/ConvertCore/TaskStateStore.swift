@@ -22,7 +22,7 @@ public final class TaskStateStore {
 
         return videos.map { video in
             if fileManager.fileExists(atPath: video.outputURL.path) {
-                return ConversionTask(video: video, status: .succeeded)
+                return ConversionTask(video: video, status: .succeeded, progress: 1)
             }
 
             guard var task = previousBySource[video.sourceURL.path] else {
@@ -31,6 +31,7 @@ public final class TaskStateStore {
 
             if task.status == .converting || task.status == .cancelled {
                 task.status = .pending
+                task.progress = 0
                 task.errorMessage = nil
                 task.updatedAt = Date()
             }

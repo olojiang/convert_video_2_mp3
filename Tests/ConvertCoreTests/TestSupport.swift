@@ -22,40 +22,63 @@ struct TemporaryDirectory {
 }
 
 final class MemoryLogger: EventLogger {
-    private let lock = NSLock()
-    private(set) var events: [(level: LogLevel, event: String, details: [String: String])] = []
+    private let queue = DispatchQueue(label: "tests.memory-logger")
+    private var storedEvents: [(level: LogLevel, event: String, details: [String: String])] = []
+
+    var events: [(level: LogLevel, event: String, details: [String: String])] {
+        queue.sync { storedEvents }
+    }
 
     func log(_ level: LogLevel, event: String, details: [String: String]) {
-        lock.lock()
-        events.append((level, event, details))
-        lock.unlock()
+        queue.sync {
+            storedEvents.append((level, event, details))
+        }
     }
 }
 
 final class FakeAudioExtractor: AudioExtracting {
-    private let lock = NSLock()
+    private let queue = DispatchQueue(label: "tests.fake-audio-extractor")
     private let delayNanoseconds: UInt64
+    private let progressFractions: [Double]
     private var active = 0
-    private(set) var maxActive = 0
-    private(set) var startedCount = 0
+    private var storedMaxActive = 0
+    private var storedStartedCount = 0
 
-    init(delayNanoseconds: UInt64) {
-        self.delayNanoseconds = delayNanoseconds
+    var maxActive: Int {
+        queue.sync { storedMaxActive }
     }
 
-    func extractMP3(source: URL, tempOutput: URL, finalOutput: URL, cancellation: CancellationChecking) async throws {
-        lock.lock()
-        active += 1
-        startedCount += 1
-        maxActive = max(maxActive, active)
-        lock.unlock()
+    var startedCount: Int {
+        queue.sync { storedStartedCount }
+    }
 
-        defer {
-            lock.lock()
-            active -= 1
-            lock.unlock()
+    init(delayNanoseconds: UInt64, progressFractions: [Double] = []) {
+        self.delayNanoseconds = delayNanoseconds
+        self.progressFractions = progressFractions
+    }
+
+    func extractMP3(
+        source: URL,
+        tempOutput: URL,
+        finalOutput: URL,
+        cancellation: CancellationChecking,
+        progress: @escaping (Double) -> Void
+    ) async throws {
+        queue.sync {
+            active += 1
+            storedStartedCount += 1
+            storedMaxActive = max(storedMaxActive, active)
         }
 
+        defer {
+            queue.sync {
+                active -= 1
+            }
+        }
+
+        for fraction in progressFractions {
+            progress(fraction)
+        }
         try await Task.sleep(nanoseconds: delayNanoseconds)
         if cancellation.isCancellationRequested {
             throw ConversionError.cancelled
@@ -65,5 +88,20 @@ final class FakeAudioExtractor: AudioExtracting {
             try FileManager.default.removeItem(at: finalOutput)
         }
         try FileManager.default.moveItem(at: tempOutput, to: finalOutput)
+    }
+}
+
+final class ProgressRecorder {
+    private let queue = DispatchQueue(label: "tests.progress-recorder")
+    private var values: [Double] = []
+
+    var progressValues: [Double] {
+        queue.sync { values }
+    }
+
+    func record(_ task: ConversionTask) {
+        queue.sync {
+            values.append(task.progress)
+        }
     }
 }

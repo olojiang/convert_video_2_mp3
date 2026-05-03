@@ -37,6 +37,18 @@ private enum BootstrapLog {
     }
 }
 
+final class KeyHandlingTableView: NSTableView {
+    var onSpace: ((Bool) -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 49 {
+            onSpace?(event.modifierFlags.contains(.control))
+            return
+        }
+        super.keyDown(with: event)
+    }
+}
+
 final class MainWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {
     private let scanner = VideoScanner()
     private let historyStore = RootHistoryStore()
@@ -51,7 +63,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private let rootLabel = NSTextField(labelWithString: "未选择目录")
     private let summaryLabel = NSTextField(labelWithString: "请选择一个根目录开始扫描")
     private let logLabel = NSTextField(labelWithString: "")
-    private let tableView = NSTableView()
+    private let tableView = KeyHandlingTableView()
     private let scrollView = NSScrollView()
     private let chooseButton = NSButton(title: "选择目录", target: nil, action: nil)
     private let rescanButton = NSButton(title: "重新扫描", target: nil, action: nil)
@@ -60,6 +72,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private let startButton = NSButton(title: "开始转 MP3", target: nil, action: nil)
     private let stopButton = NSButton(title: "停止", target: nil, action: nil)
     private let revealLogsButton = NSButton(title: "打开日志", target: nil, action: nil)
+    private let deleteSourceCheckbox = NSButton(checkboxWithTitle: "成功后删除源视频", target: nil, action: nil)
     private let concurrencyPopup = NSPopUpButton()
     private let progressIndicator = NSProgressIndicator()
 
@@ -110,6 +123,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             selectAllButton,
             selectNoneButton,
             concurrencyPopup,
+            deleteSourceCheckbox,
             startButton,
             stopButton,
             revealLogsButton
@@ -133,12 +147,16 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
         tableView.dataSource = self
         tableView.delegate = self
+        tableView.onSpace = { [weak self] controlPressed in
+            self?.playFocusedRow(openMP3: controlPressed)
+        }
         tableView.allowsMultipleSelection = true
         tableView.usesAlternatingRowBackgroundColors = true
         addColumn(id: "selected", title: "选择", width: 62)
-        addColumn(id: "file", title: "视频文件", width: 430)
+        addColumn(id: "file", title: "视频文件", width: 360)
         addColumn(id: "status", title: "状态", width: 110)
-        addColumn(id: "output", title: "输出 MP3", width: 360)
+        addColumn(id: "progress", title: "进度", width: 80)
+        addColumn(id: "output", title: "输出 MP3", width: 330)
 
         scrollView.documentView = tableView
         scrollView.hasVerticalScroller = true
@@ -180,6 +198,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         stopButton.action = #selector(stopConversion)
         revealLogsButton.target = self
         revealLogsButton.action = #selector(revealLogs)
+        deleteSourceCheckbox.target = self
+        deleteSourceCheckbox.action = #selector(deleteSourceOptionChanged)
 
         logLabel.stringValue = "日志文件：\(logger.logURL.path)"
     }
@@ -259,6 +279,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         isConverting = true
         setControlsForConversion(active: true)
         let concurrency = selectedConcurrency()
+        let options = ConversionOptions(deleteSourceOnSuccess: deleteSourceCheckbox.state == .on)
         let currentCoordinator = ConversionCoordinator(
             extractor: FFmpegAudioExtractor(),
             logger: logger,
@@ -273,9 +294,10 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         Task { @MainActor in
             logger.log(.info, event: "ui.conversion_requested", details: [
                 "selected": "\(selectedTasks.count)",
-                "concurrency": "\(concurrency)"
+                "concurrency": "\(concurrency)",
+                "delete_source_on_success": "\(options.deleteSourceOnSuccess)"
             ])
-            let converted = await currentCoordinator.convert(tasks: selectedTasks, concurrency: concurrency)
+            let converted = await currentCoordinator.convert(tasks: selectedTasks, concurrency: concurrency, options: options)
             merge(converted)
             try? stateStore?.save(tasks)
             isConverting = false
@@ -292,6 +314,12 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
     @objc private func revealLogs() {
         NSWorkspace.shared.activateFileViewerSelecting([logger.logURL])
+    }
+
+    @objc private func deleteSourceOptionChanged() {
+        logger.log(.info, event: "ui.delete_source_option_changed", details: [
+            "enabled": "\(deleteSourceCheckbox.state == .on)"
+        ])
     }
 
     private func merge(_ converted: [ConversionTask]) {
@@ -324,6 +352,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         startButton.isEnabled = !active
         stopButton.isEnabled = active
         concurrencyPopup.isEnabled = !active
+        deleteSourceCheckbox.isEnabled = !active
     }
 
     private func refresh() {
@@ -331,13 +360,57 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         let succeeded = tasks.filter { $0.status == .succeeded }.count
         let failed = tasks.filter { $0.status == .failed }.count
         let cancelled = tasks.filter { $0.status == .cancelled }.count
-        summaryLabel.stringValue = "共 \(tasks.count) 个视频，已选择 \(selectedIDs.count)，成功 \(succeeded)，失败 \(failed)，取消 \(cancelled)"
-        progressIndicator.doubleValue = tasks.isEmpty ? 0 : Double(succeeded) / Double(tasks.count)
+        let totalProgress = overallProgress()
+        summaryLabel.stringValue = "共 \(tasks.count) 个视频，已选择 \(selectedIDs.count)，成功 \(succeeded)，失败 \(failed)，取消 \(cancelled)，总进度 \(Int(totalProgress * 100))%"
+        progressIndicator.doubleValue = totalProgress
+    }
+
+    private func overallProgress() -> Double {
+        guard !tasks.isEmpty else { return 0 }
+        let total = tasks.reduce(0) { partial, task in
+            partial + (task.status == .succeeded ? 1 : task.progress)
+        }
+        return total / Double(tasks.count)
     }
 
     private func showError(_ error: Error) {
         let alert = NSAlert(error: error)
         alert.runModal()
+    }
+
+    private func showMessage(title: String, text: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = text
+        alert.alertStyle = .informational
+        alert.runModal()
+    }
+
+    private func playFocusedRow(openMP3: Bool) {
+        let row = tableView.selectedRow
+        guard row >= 0, row < tasks.count else { return }
+        let task = tasks[row]
+
+        if openMP3 {
+            guard FileManager.default.fileExists(atPath: task.outputURL.path) else {
+                logger.log(.warning, event: "playback.mp3_missing", details: [
+                    "source": task.sourceURL.path,
+                    "output": task.outputURL.path
+                ])
+                showMessage(title: "MP3 还不能播放", text: "这个视频还没有转化完成，转化成功后可以用 Ctrl+Space 播放 MP3。")
+                return
+            }
+            logger.log(.info, event: "playback.mp3_opened", details: ["output": task.outputURL.path])
+            NSWorkspace.shared.open(task.outputURL)
+            return
+        }
+
+        guard FileManager.default.fileExists(atPath: task.sourceURL.path) else {
+            showMessage(title: "源视频不存在", text: "源视频可能已经在转化成功后被删除。")
+            return
+        }
+        logger.log(.info, event: "playback.video_opened", details: ["source": task.sourceURL.path])
+        NSWorkspace.shared.open(task.sourceURL)
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int {
@@ -378,6 +451,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         switch column {
         case "file": return task.sourceURL.path
         case "status": return statusText(task)
+        case "progress": return "\(Int(task.progress * 100))%"
         case "output": return task.outputURL.path
         default: return ""
         }
@@ -386,7 +460,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private func statusText(_ task: ConversionTask) -> String {
         switch task.status {
         case .pending: return "待处理"
-        case .converting: return "转换中"
+        case .converting: return "转换中 \(Int(task.progress * 100))%"
         case .succeeded: return "成功"
         case .failed: return "失败：\(task.errorMessage ?? "未知错误")"
         case .cancelled: return "已停止"
