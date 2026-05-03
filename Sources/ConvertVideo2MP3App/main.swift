@@ -2,20 +2,38 @@ import AppKit
 import ConvertCore
 import Foundation
 
-@main
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowController: MainWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.regular)
+        BootstrapLog.write("applicationDidFinishLaunching")
         let controller = MainWindowController()
         windowController = controller
+        controller.window?.center()
+        controller.window?.makeKeyAndOrderFront(nil)
         controller.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+}
+
+private enum BootstrapLog {
+    static func write(_ message: String) {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("ConvertVideo2MP3-bootstrap.log")
+        let line = "\(Date()) \(message)\n"
+        if let data = line.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: url.path),
+               let handle = try? FileHandle(forWritingTo: url) {
+                defer { try? handle.close() }
+                _ = try? handle.seekToEnd()
+                try? handle.write(contentsOf: data)
+            } else {
+                try? data.write(to: url, options: [.atomic])
+            }
+        }
     }
 }
 
@@ -47,6 +65,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
     init() {
         logger = Self.makeLogger()
+        logger.log(.info, event: "app.window_initializing", details: [:])
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1040, height: 680),
@@ -59,6 +78,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         super.init(window: window)
         setupUI()
         restoreLastRootIfPossible()
+        logger.log(.info, event: "app.window_ready", details: ["log": logger.logURL.path])
     }
 
     required init?(coder: NSCoder) {
@@ -406,3 +426,10 @@ enum AppPaths {
             .appendingPathComponent("\(hash).json")
     }
 }
+
+let app = NSApplication.shared
+let delegate = AppDelegate()
+app.setActivationPolicy(.regular)
+app.delegate = delegate
+BootstrapLog.write("starting NSApplication.run")
+app.run()

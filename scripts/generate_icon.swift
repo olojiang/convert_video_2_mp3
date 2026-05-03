@@ -15,12 +15,17 @@ func drawIcon(size: CGFloat) -> NSImage {
     defer { image.unlockFocus() }
 
     let rect = NSRect(x: 0, y: 0, width: size, height: size)
-    NSColor(calibratedRed: 0.07, green: 0.08, blue: 0.10, alpha: 1).setFill()
-    NSBezierPath(roundedRect: rect, xRadius: size * 0.2, yRadius: size * 0.2).fill()
+    NSColor(calibratedRed: 0.05, green: 0.52, blue: 0.86, alpha: 1).setFill()
+    rect.fill()
 
-    let inner = rect.insetBy(dx: size * 0.09, dy: size * 0.09)
-    NSColor(calibratedRed: 0.10, green: 0.45, blue: 0.78, alpha: 1).setFill()
-    NSBezierPath(roundedRect: inner, xRadius: size * 0.16, yRadius: size * 0.16).fill()
+    let background = rect.insetBy(dx: size * 0.035, dy: size * 0.035)
+    NSColor(calibratedRed: 0.10, green: 0.57, blue: 0.88, alpha: 1).setFill()
+    NSBezierPath(roundedRect: background, xRadius: size * 0.18, yRadius: size * 0.18).fill()
+
+    NSColor.white.withAlphaComponent(0.18).setStroke()
+    let highlight = NSBezierPath(roundedRect: background.insetBy(dx: size * 0.018, dy: size * 0.018), xRadius: size * 0.16, yRadius: size * 0.16)
+    highlight.lineWidth = max(1, size * 0.012)
+    highlight.stroke()
 
     let video = NSBezierPath(roundedRect: NSRect(x: size * 0.18, y: size * 0.47, width: size * 0.44, height: size * 0.27), xRadius: size * 0.04, yRadius: size * 0.04)
     NSColor.white.withAlphaComponent(0.95).setFill()
@@ -31,7 +36,7 @@ func drawIcon(size: CGFloat) -> NSImage {
     play.line(to: NSPoint(x: size * 0.34, y: size * 0.69))
     play.line(to: NSPoint(x: size * 0.49, y: size * 0.605))
     play.close()
-    NSColor(calibratedRed: 0.07, green: 0.08, blue: 0.10, alpha: 1).setFill()
+    NSColor(calibratedRed: 0.05, green: 0.13, blue: 0.18, alpha: 1).setFill()
     play.fill()
 
     let noteStem = NSBezierPath(roundedRect: NSRect(x: size * 0.67, y: size * 0.34, width: size * 0.045, height: size * 0.36), xRadius: size * 0.015, yRadius: size * 0.015)
