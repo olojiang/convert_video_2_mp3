@@ -40,17 +40,27 @@ private enum BootstrapLog {
 final class KeyHandlingTableView: NSTableView {
     var onSpace: ((Bool) -> Void)?
     var onCommandBackspace: (() -> Void)?
+    var onShiftCommandBackspace: (() -> Void)?
 
     override func keyDown(with event: NSEvent) {
-        if event.keyCode == 51,
-           event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command) {
-            onCommandBackspace?()
-            return
+        if event.keyCode == 51 {
+            let modifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            if modifierFlags.contains(.command), modifierFlags.contains(.shift) {
+                onShiftCommandBackspace?()
+                return
+            }
+
+            if modifierFlags.contains(.command) {
+                onCommandBackspace?()
+                return
+            }
         }
+
         if event.keyCode == 49 {
             onSpace?(event.modifierFlags.contains(.control))
             return
         }
+
         super.keyDown(with: event)
     }
 }
@@ -171,6 +181,9 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         tableView.onCommandBackspace = { [weak self] in
             self?.deleteFocusedTaskFolder()
         }
+        tableView.onShiftCommandBackspace = { [weak self] in
+            self?.deleteFocusedSourceVideo()
+        }
         tableView.allowsMultipleSelection = true
         tableView.usesAlternatingRowBackgroundColors = true
         addColumn(id: "selected", title: "选择", width: 62)
@@ -269,6 +282,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         shortcutHelpButton.toolTip = """
         Space：播放选中行的视频
         Ctrl+Space：播放选中行的 MP3
+        Shift+Cmd+Backspace：确认后仅删除选中源视频
         Cmd+Backspace：确认后删除选中视频所在文件夹
         """
 
@@ -433,6 +447,58 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             ])
             showError(error)
         }
+    }
+
+    private func deleteFocusedSourceVideo() {
+        guard !isConverting else {
+            showMessage(title: "转换进行中", text: "请先停止或等待转换完成，再删除视频。")
+            return
+        }
+
+        let row = tableView.selectedRow
+        guard row >= 0, row < tasks.count else { return }
+
+        let task = tasks[row]
+        guard FileManager.default.fileExists(atPath: task.sourceURL.path) else {
+            showMessage(title: "源视频不存在", text: "这个源视频已经不存在。")
+            return
+        }
+
+        guard confirmDeletingSourceVideo(task.sourceURL) else {
+            logger.log(.info, event: "delete.source_video.cancelled", details: [
+                "source": task.sourceURL.path
+            ])
+            return
+        }
+
+        do {
+            try FileManager.default.removeItem(at: task.sourceURL)
+            tasks.removeAll { $0.id == task.id }
+            selectedIDs.remove(task.id)
+            applySort()
+            try stateStore?.save(tasks)
+            logger.log(.info, event: "delete.source_video.deleted", details: [
+                "source": task.sourceURL.path,
+                "output_kept": task.outputURL.path
+            ])
+            refresh()
+        } catch {
+            logger.log(.error, event: "delete.source_video.failed", details: [
+                "source": task.sourceURL.path,
+                "error": error.localizedDescription
+            ])
+            showError(error)
+        }
+    }
+
+    private func confirmDeletingSourceVideo(_ sourceURL: URL) -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "确认删除这个源视频？"
+        alert.informativeText = "只会删除这个视频文件，所在文件夹、已生成的 MP3 和其他文件都会保留，不能通过应用撤销。\n\n\(sourceURL.path)"
+        alert.addButton(withTitle: "删除视频")
+        alert.addButton(withTitle: "取消")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     private func confirmDeletingTaskFolder(_ folderURL: URL, affectedTaskCount: Int) -> Bool {
