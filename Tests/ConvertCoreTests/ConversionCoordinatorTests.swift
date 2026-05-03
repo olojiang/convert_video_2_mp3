@@ -63,6 +63,28 @@ struct ConversionCoordinatorTests {
         #expect(!FileManager.default.fileExists(atPath: source.path))
     }
 
+    @Test func deletesSourceVideoWhenOutputAlreadyExistsAndDeleteOptionIsEnabled() async throws {
+        let root = try TemporaryDirectory()
+        let source = root.url.appendingPathComponent("already-done.mp4")
+        let output = root.url.appendingPathComponent("already-done.mp3")
+        try "video".write(to: source, atomically: true, encoding: .utf8)
+        FileManager.default.createFile(atPath: output.path, contents: Data("mp3".utf8))
+        let task = ConversionTask(video: VideoFile(sourceURL: source, outputURL: output), status: .succeeded, progress: 1)
+        let extractor = FakeAudioExtractor(delayNanoseconds: 1)
+
+        let coordinator = ConversionCoordinator(extractor: extractor, logger: MemoryLogger())
+        let results = await coordinator.convert(
+            tasks: [task],
+            concurrency: 1,
+            options: ConversionOptions(deleteSourceOnSuccess: true)
+        )
+
+        #expect(results[0].status == .succeeded)
+        #expect(extractor.startedCount == 0)
+        #expect(FileManager.default.fileExists(atPath: output.path))
+        #expect(!FileManager.default.fileExists(atPath: source.path))
+    }
+
     @Test func publishesProgressUpdatesDuringConversion() async throws {
         let root = try TemporaryDirectory()
         let source = root.url.appendingPathComponent("progress.mov")

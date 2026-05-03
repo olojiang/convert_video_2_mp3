@@ -149,6 +149,27 @@ public final class ConversionCoordinator {
                 "output": task.outputURL.path,
                 "status": task.status.rawValue
             ])
+            if options.deleteSourceOnSuccess,
+               FileManager.default.fileExists(atPath: task.sourceURL.path) {
+                do {
+                    try FileManager.default.removeItem(at: task.sourceURL)
+                    task.updatedAt = Date()
+                    logger.log(.info, event: "conversion.source_deleted", details: [
+                        "source": task.sourceURL.path,
+                        "output": task.outputURL.path
+                    ])
+                } catch {
+                    task.status = .failed
+                    task.errorMessage = error.localizedDescription
+                    task.updatedAt = Date()
+                    logger.log(.error, event: "conversion.source_delete_failed", details: [
+                        "source": task.sourceURL.path,
+                        "output": task.outputURL.path,
+                        "status": task.status.rawValue,
+                        "error": error.localizedDescription
+                    ])
+                }
+            }
             onTaskUpdate(task)
             return (index, task)
         }

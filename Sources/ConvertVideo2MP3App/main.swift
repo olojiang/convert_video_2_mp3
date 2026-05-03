@@ -591,7 +591,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             restoredPlaybackPosition = try playbackStateStore?.load(for: mp3Tracks)
             applySort()
             applyMP3Sort()
-            selectedIDs = Set(tasks.filter { $0.status != .succeeded }.map(\.id))
+            selectedIDs = Set(tasks.filter { canSelectForConversion($0) }.map(\.id))
             try stateStore?.save(tasks)
 
             logger.log(.info, event: "scan.finished", details: [
@@ -609,7 +609,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     }
 
     @objc private func selectAllTasks() {
-        selectedIDs = Set(tasks.map(\.id))
+        selectedIDs = Set(tasks.filter { canSelectForConversion($0) }.map(\.id))
         refresh()
     }
 
@@ -620,7 +620,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
     @objc private func startConversion() {
         guard !isConverting else { return }
-        let selectedTasks = tasks.filter { selectedIDs.contains($0.id) && $0.status != .succeeded }
+        let selectedTasks = selectedConversionTasks()
         guard !selectedTasks.isEmpty else { return }
 
         isConverting = true
@@ -842,6 +842,12 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         logger.log(.info, event: "ui.delete_source_option_changed", details: [
             "enabled": "\(deleteSourceCheckbox.state == .on)"
         ])
+        if deleteSourceCheckbox.state == .on {
+            selectedIDs.formUnion(tasks.filter { $0.status == .succeeded && canSelectForConversion($0) }.map(\.id))
+        } else {
+            selectedIDs = Set(tasks.filter { selectedIDs.contains($0.id) && $0.status != .succeeded }.map(\.id))
+        }
+        refresh()
     }
 
     private func merge(_ converted: [ConversionTask]) {
@@ -870,11 +876,25 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         }
     }
 
+    private func selectedConversionTasks() -> [ConversionTask] {
+        tasks.filter { selectedIDs.contains($0.id) && canSelectForConversion($0) }
+    }
+
+    private func canSelectForConversion(_ task: ConversionTask) -> Bool {
+        if task.status != .succeeded {
+            return true
+        }
+
+        return deleteSourceCheckbox.state == .on
+            && FileManager.default.fileExists(atPath: task.sourceURL.path)
+            && FileManager.default.fileExists(atPath: task.outputURL.path)
+    }
+
     private func setControlsForConversion(active: Bool) {
         chooseButton.isEnabled = !active
         rescanButton.isEnabled = !active
         modeControl.isEnabled = !active
-        startButton.isEnabled = !active
+        startButton.isEnabled = !active && !selectedConversionTasks().isEmpty
         stopButton.isEnabled = active
         concurrencyPopup.isEnabled = !active
         deleteSourceCheckbox.isEnabled = !active
@@ -1281,7 +1301,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             let button = NSButton(checkboxWithTitle: "", target: self, action: #selector(toggleSelection(_:)))
             button.state = selectedIDs.contains(task.id) ? .on : .off
             button.tag = row
-            button.isEnabled = !isConverting && task.status != .succeeded
+            button.isEnabled = !isConverting && canSelectForConversion(task)
             return button
         }
 
