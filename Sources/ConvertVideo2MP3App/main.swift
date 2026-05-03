@@ -39,8 +39,14 @@ private enum BootstrapLog {
 
 final class KeyHandlingTableView: NSTableView {
     var onSpace: ((Bool) -> Void)?
+    var onCommandBackspace: (() -> Void)?
 
     override func keyDown(with event: NSEvent) {
+        if event.keyCode == 51,
+           event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command) {
+            onCommandBackspace?()
+            return
+        }
         if event.keyCode == 49 {
             onSpace?(event.modifierFlags.contains(.control))
             return
@@ -53,7 +59,9 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private let scanner = VideoScanner()
     private let partFolderCleaner = PartFolderCleaner()
     private let fileSizeReader = FileSizeReader()
+    private let taskSorter = ConversionTaskSorter()
     private let historyStore = RootHistoryStore()
+    private let sortPreferenceStore = TableSortPreferenceStore()
     private let logger: FileEventLogger
     private var stateStore: TaskStateStore?
     private var coordinator: ConversionCoordinator?
@@ -61,6 +69,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private var tasks: [ConversionTask] = []
     private var selectedIDs = Set<String>()
     private var isConverting = false
+    private var sortPreference = ConversionTaskSortOption()
 
     private let rootLabel = NSTextField(labelWithString: "未选择目录")
     private let summaryLabel = NSTextField(labelWithString: "请选择一个根目录开始扫描")
@@ -75,12 +84,14 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private let stopButton = NSButton(title: "停止", target: nil, action: nil)
     private let revealLogsButton = NSButton(title: "打开日志", target: nil, action: nil)
     private let cleanPartFoldersButton = NSButton(title: "清理 .mp4.part 文件夹", target: nil, action: nil)
+    private let shortcutHelpButton = NSButton()
     private let deleteSourceCheckbox = NSButton(checkboxWithTitle: "成功后删除源视频", target: nil, action: nil)
     private let concurrencyPopup = NSPopUpButton()
     private let progressIndicator = NSProgressIndicator()
 
     init() {
         logger = Self.makeLogger()
+        sortPreference = sortPreferenceStore.load()
         logger.log(.info, event: "app.window_initializing", details: [:])
 
         let window = NSWindow(
@@ -130,7 +141,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             startButton,
             stopButton,
             cleanPartFoldersButton,
-            revealLogsButton
+            revealLogsButton,
+            shortcutHelpButton
         ])
         toolbar.orientation = .horizontal
         toolbar.spacing = 8
@@ -151,8 +163,13 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
         tableView.dataSource = self
         tableView.delegate = self
+        tableView.autosaveName = "conversionTasksTable"
+        tableView.autosaveTableColumns = true
         tableView.onSpace = { [weak self] controlPressed in
             self?.playFocusedRow(openMP3: controlPressed)
+        }
+        tableView.onCommandBackspace = { [weak self] in
+            self?.deleteFocusedTaskFolder()
         }
         tableView.allowsMultipleSelection = true
         tableView.usesAlternatingRowBackgroundColors = true
@@ -163,6 +180,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         addColumn(id: "videoSize", title: "视频大小", width: 100)
         addColumn(id: "mp3Size", title: "MP3大小", width: 100)
         addColumn(id: "output", title: "输出 MP3", width: 310)
+        configureSortableColumns()
+        applySortPreferenceToTableHeader()
 
         scrollView.documentView = tableView
         scrollView.hasVerticalScroller = true
@@ -208,6 +227,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         cleanPartFoldersButton.action = #selector(cleanPartFolders)
         deleteSourceCheckbox.target = self
         deleteSourceCheckbox.action = #selector(deleteSourceOptionChanged)
+        configureShortcutHelpButton()
 
         logLabel.stringValue = "日志文件：\(logger.logURL.path)"
     }
@@ -217,6 +237,46 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         column.title = title
         column.width = width
         tableView.addTableColumn(column)
+    }
+
+    private func configureSortableColumns() {
+        tableColumn(id: "file")?.sortDescriptorPrototype = NSSortDescriptor(key: "fileName", ascending: true)
+        tableColumn(id: "videoSize")?.sortDescriptorPrototype = NSSortDescriptor(key: "videoSize", ascending: true)
+        tableColumn(id: "mp3Size")?.sortDescriptorPrototype = NSSortDescriptor(key: "mp3Size", ascending: true)
+    }
+
+    private func applySortPreferenceToTableHeader() {
+        let key: String
+        switch sortPreference.column {
+        case .fileName: key = "fileName"
+        case .videoSize: key = "videoSize"
+        case .mp3Size: key = "mp3Size"
+        }
+        tableView.sortDescriptors = [
+            NSSortDescriptor(key: key, ascending: sortPreference.direction == .ascending)
+        ]
+    }
+
+    private func tableColumn(id: String) -> NSTableColumn? {
+        tableView.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier(id))
+    }
+
+    private func configureShortcutHelpButton() {
+        shortcutHelpButton.title = ""
+        shortcutHelpButton.bezelStyle = .texturedRounded
+        shortcutHelpButton.imagePosition = .imageOnly
+        shortcutHelpButton.isBordered = true
+        shortcutHelpButton.toolTip = """
+        Space：播放选中行的视频
+        Ctrl+Space：播放选中行的 MP3
+        Cmd+Backspace：确认后删除选中视频所在文件夹
+        """
+
+        if let image = NSImage(systemSymbolName: "keyboard", accessibilityDescription: "快捷键") {
+            shortcutHelpButton.image = image
+        } else {
+            shortcutHelpButton.title = "⌘"
+        }
     }
 
     private func restoreLastRootIfPossible() {
@@ -254,6 +314,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             stateStore = TaskStateStore(stateURL: appStateURL)
             let videos = try scanner.scan(root: url)
             tasks = try stateStore?.load(for: videos) ?? []
+            applySort()
             selectedIDs = Set(tasks.filter { $0.status != .succeeded }.map(\.id))
             try stateStore?.save(tasks)
 
@@ -322,6 +383,72 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
     @objc private func revealLogs() {
         NSWorkspace.shared.activateFileViewerSelecting([logger.logURL])
+    }
+
+    private func deleteFocusedTaskFolder() {
+        guard !isConverting else {
+            showMessage(title: "转换进行中", text: "请先停止或等待转换完成，再删除文件夹。")
+            return
+        }
+
+        let row = tableView.selectedRow
+        guard row >= 0, row < tasks.count else { return }
+        guard let rootURL else { return }
+
+        let task = tasks[row]
+        let folderURL = task.sourceURL.deletingLastPathComponent()
+        if folderURL.standardizedFileURL.path == rootURL.standardizedFileURL.path {
+            showMessage(title: "不能删除当前根目录", text: "选中的视频就在扫描根目录下。为避免误删整个根目录，请在 Finder 中手动处理。")
+            return
+        }
+
+        guard FileManager.default.fileExists(atPath: folderURL.path) else {
+            showMessage(title: "文件夹不存在", text: "这个视频所在的文件夹已经不存在。")
+            return
+        }
+
+        let affectedTasks = tasks.filter { isFile($0.sourceURL, inside: folderURL) }
+        guard confirmDeletingTaskFolder(folderURL, affectedTaskCount: affectedTasks.count) else {
+            logger.log(.info, event: "delete.task_folder.cancelled", details: [
+                "folder": folderURL.path
+            ])
+            return
+        }
+
+        do {
+            try FileManager.default.removeItem(at: folderURL)
+            tasks.removeAll { isFile($0.sourceURL, inside: folderURL) }
+            selectedIDs.subtract(affectedTasks.map { $0.id })
+            applySort()
+            try stateStore?.save(tasks)
+            logger.log(.info, event: "delete.task_folder.deleted", details: [
+                "folder": folderURL.path,
+                "tasks_removed": "\(affectedTasks.count)"
+            ])
+            refresh()
+        } catch {
+            logger.log(.error, event: "delete.task_folder.failed", details: [
+                "folder": folderURL.path,
+                "error": error.localizedDescription
+            ])
+            showError(error)
+        }
+    }
+
+    private func confirmDeletingTaskFolder(_ folderURL: URL, affectedTaskCount: Int) -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "确认删除这个文件夹？"
+        alert.informativeText = "将递归删除文件夹及其中所有文件，不能通过应用撤销。\n\n\(folderURL.path)\n\n表格中将移除 \(affectedTaskCount) 个视频任务。"
+        alert.addButton(withTitle: "删除文件夹")
+        alert.addButton(withTitle: "取消")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    private func isFile(_ fileURL: URL, inside folderURL: URL) -> Bool {
+        let folderPath = folderURL.standardizedFileURL.path
+        let filePath = fileURL.standardizedFileURL.path
+        return filePath == folderPath || filePath.hasPrefix(folderPath + "/")
     }
 
     @objc private func cleanPartFolders() {
@@ -394,11 +521,13 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
                 tasks[index] = task
             }
         }
+        applySort()
     }
 
     @MainActor private func apply(taskUpdate: ConversionTask) {
         guard let index = tasks.firstIndex(where: { $0.id == taskUpdate.id }) else { return }
         tasks[index] = taskUpdate
+        applySort()
         try? stateStore?.save(tasks)
         refresh()
     }
@@ -430,6 +559,10 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         let sizeSummary = fileSizeReader.summary(for: tasks)
         summaryLabel.stringValue = "共 \(tasks.count) 个视频，已选择 \(selectedIDs.count)，成功 \(succeeded)，失败 \(failed)，取消 \(cancelled)，总进度 \(Int(totalProgress * 100))%，视频总大小 \(FileSizeText.format(sizeSummary.videoBytes))，MP3总大小 \(FileSizeText.format(sizeSummary.mp3Bytes))"
         progressIndicator.doubleValue = totalProgress
+    }
+
+    private func applySort() {
+        tasks = taskSorter.sorted(tasks, by: sortPreference)
     }
 
     private func overallProgress() -> Double {
@@ -504,6 +637,31 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         return text
     }
 
+    func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
+        guard let descriptor = tableView.sortDescriptors.first,
+              let key = descriptor.key,
+              let column = sortColumn(for: key) else {
+            return
+        }
+
+        sortPreference = ConversionTaskSortOption(
+            column: column,
+            direction: descriptor.ascending ? .ascending : .descending
+        )
+        sortPreferenceStore.save(sortPreference)
+        applySort()
+        refresh()
+    }
+
+    private func sortColumn(for key: String) -> ConversionTaskSortColumn? {
+        switch key {
+        case "fileName": return .fileName
+        case "videoSize": return .videoSize
+        case "mp3Size": return .mp3Size
+        default: return nil
+        }
+    }
+
     @objc private func toggleSelection(_ sender: NSButton) {
         let task = tasks[sender.tag]
         if sender.state == .on {
@@ -567,6 +725,31 @@ enum AppPaths {
         return supportDirectory()
             .appendingPathComponent("state", isDirectory: true)
             .appendingPathComponent("\(hash).json")
+    }
+}
+
+private struct TableSortPreferenceStore {
+    private let key: String
+    private let defaults: UserDefaults
+    private let encoder = JSONEncoder()
+    private let decoder = JSONDecoder()
+
+    init(key: String = "conversionTasksSortPreference", defaults: UserDefaults = .standard) {
+        self.key = key
+        self.defaults = defaults
+    }
+
+    func load() -> ConversionTaskSortOption {
+        guard let data = defaults.data(forKey: key),
+              let option = try? decoder.decode(ConversionTaskSortOption.self, from: data) else {
+            return ConversionTaskSortOption()
+        }
+        return option
+    }
+
+    func save(_ option: ConversionTaskSortOption) {
+        guard let data = try? encoder.encode(option) else { return }
+        defaults.set(data, forKey: key)
     }
 }
 

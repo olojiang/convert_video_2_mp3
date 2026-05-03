@@ -61,3 +61,104 @@ public enum FileSizeText {
         return String(format: "%.2f %@", value, units[unitIndex])
     }
 }
+
+public enum ConversionTaskSortColumn: String, Codable, Equatable, CaseIterable {
+    case fileName
+    case videoSize
+    case mp3Size
+}
+
+public enum SortDirection: String, Codable, Equatable, CaseIterable {
+    case ascending
+    case descending
+}
+
+public struct ConversionTaskSortOption: Codable, Equatable {
+    public var column: ConversionTaskSortColumn
+    public var direction: SortDirection
+
+    public init(column: ConversionTaskSortColumn = .fileName, direction: SortDirection = .ascending) {
+        self.column = column
+        self.direction = direction
+    }
+}
+
+public struct ConversionTaskSorter {
+    private let fileSizeReader: FileSizeReader
+
+    public init(fileSizeReader: FileSizeReader = FileSizeReader()) {
+        self.fileSizeReader = fileSizeReader
+    }
+
+    public func sorted(_ tasks: [ConversionTask], by option: ConversionTaskSortOption) -> [ConversionTask] {
+        tasks.sorted { lhs, rhs in
+            compare(lhs, rhs, by: option) == .orderedAscending
+        }
+    }
+
+    private func compare(
+        _ lhs: ConversionTask,
+        _ rhs: ConversionTask,
+        by option: ConversionTaskSortOption
+    ) -> ComparisonResult {
+        let result: ComparisonResult
+        switch option.column {
+        case .fileName:
+            result = compareFileNames(lhs, rhs)
+        case .videoSize:
+            result = compareSizes(
+                fileSizeReader.sizeOfFile(at: lhs.sourceURL),
+                fileSizeReader.sizeOfFile(at: rhs.sourceURL),
+                lhs,
+                rhs,
+                direction: option.direction
+            )
+        case .mp3Size:
+            result = compareSizes(
+                fileSizeReader.sizeOfFile(at: lhs.outputURL),
+                fileSizeReader.sizeOfFile(at: rhs.outputURL),
+                lhs,
+                rhs,
+                direction: option.direction
+            )
+        }
+
+        guard option.column == .fileName, option.direction == .descending else { return result }
+        switch result {
+        case .orderedAscending: return .orderedDescending
+        case .orderedDescending: return .orderedAscending
+        case .orderedSame: return .orderedSame
+        }
+    }
+
+    private func compareSizes(
+        _ lhsSize: Int64?,
+        _ rhsSize: Int64?,
+        _ lhs: ConversionTask,
+        _ rhs: ConversionTask,
+        direction: SortDirection
+    ) -> ComparisonResult {
+        switch (lhsSize, rhsSize) {
+        case let (lhsSize?, rhsSize?):
+            if lhsSize < rhsSize {
+                return direction == .ascending ? .orderedAscending : .orderedDescending
+            }
+            if lhsSize > rhsSize {
+                return direction == .ascending ? .orderedDescending : .orderedAscending
+            }
+            return compareFileNames(lhs, rhs)
+        case (nil, nil):
+            return compareFileNames(lhs, rhs)
+        case (nil, _?):
+            return .orderedDescending
+        case (_?, nil):
+            return .orderedAscending
+        }
+    }
+
+    private func compareFileNames(_ lhs: ConversionTask, _ rhs: ConversionTask) -> ComparisonResult {
+        let nameResult = lhs.sourceURL.lastPathComponent.localizedStandardCompare(rhs.sourceURL.lastPathComponent)
+        guard nameResult == .orderedSame else { return nameResult }
+        return lhs.sourceURL.path.localizedStandardCompare(rhs.sourceURL.path)
+    }
+}
