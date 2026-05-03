@@ -445,6 +445,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             tableColumn(id: "selected")?.isHidden = false
             tableColumn(id: "file")?.title = "视频文件"
             tableColumn(id: "file")?.width = 330
+            tableColumn(id: "status")?.isHidden = false
             tableColumn(id: "status")?.title = "状态"
             tableColumn(id: "progress")?.isHidden = false
             tableColumn(id: "progress")?.title = "进度"
@@ -462,6 +463,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             tableColumn(id: "selected")?.isHidden = true
             tableColumn(id: "file")?.title = "MP3 文件"
             tableColumn(id: "file")?.width = 420
+            tableColumn(id: "status")?.isHidden = true
             tableColumn(id: "status")?.title = "播放"
             tableColumn(id: "progress")?.isHidden = true
             tableColumn(id: "progress")?.title = "位置"
@@ -904,9 +906,11 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         let currentText: String
         if let index = currentMP3Index(), index < mp3Tracks.count {
             let track = mp3Tracks[index]
+            let status = mp3StatusText(for: track)
             let time = audioPlayer?.currentTime ?? restoredPlaybackPosition?.time ?? 0
             let duration = audioPlayer?.duration
-            currentText = "，当前 \(index + 1)/\(mp3Tracks.count)：\(track.url.lastPathComponent) \(formatPlaybackTime(time, duration: duration))"
+            let prefix = status.isEmpty ? "当前" : status
+            currentText = "，\(prefix) \(index + 1)/\(mp3Tracks.count)：\(track.url.lastPathComponent) \(formatPlaybackTime(time, duration: duration))"
         } else if let restoredPlaybackPosition,
                   let index = mp3Tracks.firstIndex(where: { $0.id == restoredPlaybackPosition.trackID }) {
             currentText = "，已记住 \(index + 1)/\(mp3Tracks.count)：\(formatPlaybackTime(restoredPlaybackPosition.time, duration: nil))"
