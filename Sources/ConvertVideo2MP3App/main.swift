@@ -70,7 +70,7 @@ final class KeyHandlingTableView: NSTableView {
     }
 }
 
-private enum AppMode {
+private enum AppMode: String, Codable {
     case conversion
     case mp3Playback
 }
@@ -81,8 +81,11 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private let partFolderCleaner = PartFolderCleaner()
     private let fileSizeReader = FileSizeReader()
     private let taskSorter = ConversionTaskSorter()
+    private let mp3TrackSorter = MP3TrackSorter()
     private let historyStore = RootHistoryStore()
     private let sortPreferenceStore = TableSortPreferenceStore()
+    private let mp3SortPreferenceStore = MP3SortPreferenceStore()
+    private let viewPreferenceStore = ViewPreferenceStore()
     private let logger: FileEventLogger
     private var stateStore: TaskStateStore?
     private var coordinator: ConversionCoordinator?
@@ -93,6 +96,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private var isConverting = false
     private var appMode: AppMode = .conversion
     private var sortPreference = ConversionTaskSortOption()
+    private var mp3SortPreference = MP3TrackSortOption()
     private var playbackStateStore: MP3PlaybackStateStore?
     private var restoredPlaybackPosition: MP3PlaybackPosition?
     private var audioPlayer: AVAudioPlayer?
@@ -127,7 +131,9 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
     init() {
         logger = Self.makeLogger()
+        appMode = viewPreferenceStore.load()
         sortPreference = sortPreferenceStore.load()
+        mp3SortPreference = mp3SortPreferenceStore.load()
         logger.log(.info, event: "app.window_initializing", details: [:])
 
         let window = NSWindow(
@@ -195,7 +201,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
         concurrencyPopup.addItems(withTitles: ["并发 4", "并发 6", "并发 8"])
         concurrencyPopup.selectItem(withTitle: "并发 4")
-        modeControl.selectedSegment = 0
+        modeControl.selectedSegment = appMode == .mp3Playback ? 1 : 0
         stopButton.isEnabled = false
 
         rootLabel.lineBreakMode = .byTruncatingMiddle
@@ -318,6 +324,11 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         tableColumn(id: "mp3Size")?.sortDescriptorPrototype = NSSortDescriptor(key: "mp3Size", ascending: true)
     }
 
+    private func configureMP3SortableColumns() {
+        tableColumn(id: "file")?.sortDescriptorPrototype = NSSortDescriptor(key: "mp3FileName", ascending: true)
+        tableColumn(id: "videoSize")?.sortDescriptorPrototype = NSSortDescriptor(key: "mp3FileSize", ascending: true)
+    }
+
     private func applySortPreferenceToTableHeader() {
         let key: String
         switch sortPreference.column {
@@ -327,6 +338,17 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         }
         tableView.sortDescriptors = [
             NSSortDescriptor(key: key, ascending: sortPreference.direction == .ascending)
+        ]
+    }
+
+    private func applyMP3SortPreferenceToTableHeader() {
+        let key: String
+        switch mp3SortPreference.column {
+        case .fileName: key = "mp3FileName"
+        case .fileSize: key = "mp3FileSize"
+        }
+        tableView.sortDescriptors = [
+            NSSortDescriptor(key: key, ascending: mp3SortPreference.direction == .ascending)
         ]
     }
 
@@ -350,10 +372,11 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             tableColumn(id: "output")?.title = "输出 MP3"
             tableColumn(id: "output")?.width = 310
         case .mp3Playback:
-            tableView.sortDescriptors = []
             for column in tableView.tableColumns {
                 column.sortDescriptorPrototype = nil
             }
+            configureMP3SortableColumns()
+            applyMP3SortPreferenceToTableHeader()
             tableColumn(id: "selected")?.isHidden = true
             tableColumn(id: "file")?.title = "MP3 文件"
             tableColumn(id: "file")?.width = 420
@@ -448,6 +471,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     @objc private func modeChanged() {
         saveCurrentPlaybackPosition()
         appMode = modeControl.selectedSegment == 1 ? .mp3Playback : .conversion
+        viewPreferenceStore.save(appMode)
         if appMode == .conversion {
             stopMP3Playback()
         } else {
@@ -475,6 +499,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             mp3Tracks = try mp3Scanner.scan(root: url)
             restoredPlaybackPosition = try playbackStateStore?.load(for: mp3Tracks)
             applySort()
+            applyMP3Sort()
             selectedIDs = Set(tasks.filter { $0.status != .succeeded }.map(\.id))
             try stateStore?.save(tasks)
 
@@ -813,6 +838,10 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         tasks = taskSorter.sorted(tasks, by: sortPreference)
     }
 
+    private func applyMP3Sort() {
+        mp3Tracks = mp3TrackSorter.sorted(mp3Tracks, by: mp3SortPreference)
+    }
+
     private func overallProgress() -> Double {
         guard !tasks.isEmpty else { return 0 }
         let total = tasks.reduce(0) { partial, task in
@@ -862,6 +891,9 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     }
 
     func persistSession() {
+        viewPreferenceStore.save(appMode)
+        sortPreferenceStore.save(sortPreference)
+        mp3SortPreferenceStore.save(mp3SortPreference)
         saveCurrentPlaybackPosition()
     }
 
@@ -1097,19 +1129,24 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     }
 
     func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
-        guard appMode == .conversion else { return }
         guard let descriptor = tableView.sortDescriptors.first,
-              let key = descriptor.key,
-              let column = sortColumn(for: key) else {
+              let key = descriptor.key else {
             return
         }
 
-        sortPreference = ConversionTaskSortOption(
-            column: column,
-            direction: descriptor.ascending ? .ascending : .descending
-        )
-        sortPreferenceStore.save(sortPreference)
-        applySort()
+        let direction: SortDirection = descriptor.ascending ? .ascending : .descending
+        switch appMode {
+        case .conversion:
+            guard let column = sortColumn(for: key) else { return }
+            sortPreference = ConversionTaskSortOption(column: column, direction: direction)
+            sortPreferenceStore.save(sortPreference)
+            applySort()
+        case .mp3Playback:
+            guard let column = mp3SortColumn(for: key) else { return }
+            mp3SortPreference = MP3TrackSortOption(column: column, direction: direction)
+            mp3SortPreferenceStore.save(mp3SortPreference)
+            applyMP3Sort()
+        }
         refresh()
     }
 
@@ -1118,6 +1155,14 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         case "fileName": return .fileName
         case "videoSize": return .videoSize
         case "mp3Size": return .mp3Size
+        default: return nil
+        }
+    }
+
+    private func mp3SortColumn(for key: String) -> MP3TrackSortColumn? {
+        switch key {
+        case "mp3FileName": return .fileName
+        case "mp3FileSize": return .fileSize
         default: return nil
         }
     }
@@ -1266,6 +1311,53 @@ private struct TableSortPreferenceStore {
     func save(_ option: ConversionTaskSortOption) {
         guard let data = try? encoder.encode(option) else { return }
         defaults.set(data, forKey: key)
+    }
+}
+
+private struct MP3SortPreferenceStore {
+    private let key: String
+    private let defaults: UserDefaults
+    private let encoder = JSONEncoder()
+    private let decoder = JSONDecoder()
+
+    init(key: String = "mp3TracksSortPreference", defaults: UserDefaults = .standard) {
+        self.key = key
+        self.defaults = defaults
+    }
+
+    func load() -> MP3TrackSortOption {
+        guard let data = defaults.data(forKey: key),
+              let option = try? decoder.decode(MP3TrackSortOption.self, from: data) else {
+            return MP3TrackSortOption()
+        }
+        return option
+    }
+
+    func save(_ option: MP3TrackSortOption) {
+        guard let data = try? encoder.encode(option) else { return }
+        defaults.set(data, forKey: key)
+    }
+}
+
+private struct ViewPreferenceStore {
+    private let key: String
+    private let defaults: UserDefaults
+
+    init(key: String = "mainViewMode", defaults: UserDefaults = .standard) {
+        self.key = key
+        self.defaults = defaults
+    }
+
+    func load() -> AppMode {
+        guard let rawValue = defaults.string(forKey: key),
+              let mode = AppMode(rawValue: rawValue) else {
+            return .conversion
+        }
+        return mode
+    }
+
+    func save(_ mode: AppMode) {
+        defaults.set(mode.rawValue, forKey: key)
     }
 }
 

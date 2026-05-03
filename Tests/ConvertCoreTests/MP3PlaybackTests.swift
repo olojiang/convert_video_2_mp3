@@ -15,6 +15,43 @@ struct MP3PlaybackTests {
         #expect(tracks.map(\.url.lastPathComponent) == ["track-2.MP3", "track-10.mp3"])
     }
 
+    @Test func sortsMP3TracksByFileNameInBothDirections() throws {
+        let root = try TemporaryDirectory()
+        let first = try makeTrack(root: root.url, name: "track-2.mp3", bytes: 10)
+        let second = try makeTrack(root: root.url, name: "track-10.mp3", bytes: 10)
+
+        let ascending = MP3TrackSorter().sorted(
+            [second, first],
+            by: MP3TrackSortOption(column: .fileName, direction: .ascending)
+        )
+        let descending = MP3TrackSorter().sorted(
+            [first, second],
+            by: MP3TrackSortOption(column: .fileName, direction: .descending)
+        )
+
+        #expect(ascending.map { $0.url.lastPathComponent } == ["track-2.mp3", "track-10.mp3"])
+        #expect(descending.map { $0.url.lastPathComponent } == ["track-10.mp3", "track-2.mp3"])
+    }
+
+    @Test func sortsMP3TracksByFileSizeAndKeepsMissingFilesLast() throws {
+        let root = try TemporaryDirectory()
+        let missing = root.url.appendingPathComponent("missing.mp3")
+        let small = try makeTrack(root: root.url, name: "small.mp3", bytes: 1)
+        let large = try makeTrack(root: root.url, name: "large.mp3", bytes: 100)
+
+        let ascending = MP3TrackSorter().sorted(
+            [MP3Track(url: missing), large, small],
+            by: MP3TrackSortOption(column: .fileSize, direction: .ascending)
+        )
+        let descending = MP3TrackSorter().sorted(
+            [MP3Track(url: missing), small, large],
+            by: MP3TrackSortOption(column: .fileSize, direction: .descending)
+        )
+
+        #expect(ascending.map { $0.url.lastPathComponent } == ["small.mp3", "large.mp3", "missing.mp3"])
+        #expect(descending.map { $0.url.lastPathComponent } == ["large.mp3", "small.mp3", "missing.mp3"])
+    }
+
     @Test func persistsAndRestoresPlaybackPositionForExistingTrack() throws {
         let root = try TemporaryDirectory()
         let stateURL = root.url.appendingPathComponent("mp3-state.json")
@@ -46,5 +83,11 @@ struct MP3PlaybackTests {
         ])
 
         #expect(restored == nil)
+    }
+
+    private func makeTrack(root: URL, name: String, bytes: Int) throws -> MP3Track {
+        let url = root.appendingPathComponent(name)
+        try Data(repeating: 1, count: bytes).write(to: url)
+        return MP3Track(url: url)
     }
 }
