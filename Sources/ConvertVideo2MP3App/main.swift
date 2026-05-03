@@ -881,8 +881,10 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         updateProgressSeekability()
     }
 
-    private func refresh() {
-        tableView.reloadData()
+    private func refresh(reloadTable: Bool = true) {
+        if reloadTable {
+            tableView.reloadData()
+        }
         configureControlsForMode()
         guard appMode == .conversion else {
             refreshMP3Summary()
@@ -1029,7 +1031,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
                 player.play()
                 startPlaybackTimer()
             }
-            refresh()
+            refresh(reloadTable: false)
             return
         }
 
@@ -1115,7 +1117,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
                 "track": track.url.path,
                 "time": "\(Int(player.currentTime))"
             ])
-            refresh()
+            refresh(reloadTable: false)
         } catch {
             logger.log(.error, event: "mp3.playback_failed", details: [
                 "track": track.url.path,
@@ -1132,7 +1134,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         }
         player.currentTime = min(max(0, player.currentTime + seconds), player.duration)
         saveCurrentPlaybackPosition()
-        refresh()
+        refresh(reloadTable: false)
     }
 
     private func seekMP3(toProgress progress: Double) {
@@ -1144,7 +1146,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         }
         player.currentTime = min(max(0, progress), 1) * player.duration
         saveCurrentPlaybackPosition()
-        refresh()
+        refresh(reloadTable: false)
     }
 
     private func updateProgressSeekability() {
@@ -1200,7 +1202,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         playbackTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             guard let self else { return }
             self.saveCurrentPlaybackPosition()
-            self.refresh()
+            self.refresh(reloadTable: false)
         }
         playPauseButton.title = "暂停"
         updateProgressSeekability()
