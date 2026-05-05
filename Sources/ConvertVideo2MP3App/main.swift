@@ -203,7 +203,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             backing: .buffered,
             defer: false
         )
-        window.title = "Convert Video 2 MP3"
+        window.title = "Video2Mp3 纪"
         window.minSize = NSSize(width: 1040, height: 560)
         super.init(window: window)
         setupUI()

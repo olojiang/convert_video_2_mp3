@@ -3,7 +3,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="ConvertVideo2MP3"
-APP_BUNDLE="${APP_NAME}.app"
+DISPLAY_NAME="Video2Mp3 纪"
+APP_BUNDLE="${DISPLAY_NAME}.app"
+LEGACY_APP_BUNDLE="${APP_NAME}.app"
 DIST_DIR="${ROOT_DIR}/dist"
 APP_DIR="${DIST_DIR}/${APP_BUNDLE}"
 CONTENTS_DIR="${APP_DIR}/Contents"
@@ -11,7 +13,7 @@ MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RESOURCES_DIR="${CONTENTS_DIR}/Resources"
 ICONSET_DIR="${DIST_DIR}/AppIcon.iconset"
 ICNS_PATH="${RESOURCES_DIR}/AppIcon.icns"
-ZIP_PATH="${DIST_DIR}/${APP_NAME}.zip"
+ZIP_PATH="${DIST_DIR}/${DISPLAY_NAME}.zip"
 
 cd "${ROOT_DIR}"
 
@@ -43,13 +45,15 @@ cat > "${CONTENTS_DIR}/Info.plist" <<PLIST
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
-  <string>Convert Video 2 MP3</string>
+  <string>${DISPLAY_NAME}</string>
+  <key>CFBundleDisplayName</key>
+  <string>${DISPLAY_NAME}</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>1.0.0</string>
+  <string>1.5.4</string>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>154</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>NSHighResolutionCapable</key>
@@ -61,7 +65,7 @@ PLIST
 codesign --force --deep --sign - "${APP_DIR}"
 ditto -c -k --sequesterRsrc --keepParent "${APP_DIR}" "${ZIP_PATH}"
 
-rm -rf "/Applications/${APP_BUNDLE}"
+rm -rf "/Applications/${APP_BUNDLE}" "/Applications/${LEGACY_APP_BUNDLE}"
 cp -R "${APP_DIR}" "/Applications/${APP_BUNDLE}"
 
 echo "Built: ${APP_DIR}"
