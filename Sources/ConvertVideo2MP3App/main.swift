@@ -201,6 +201,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private let pitchOutputField = NSTextField()
     private let choosePitchInputButton = NSButton(title: "选择 MP3", target: nil, action: nil)
     private let choosePitchOutputButton = NSButton(title: "输出为", target: nil, action: nil)
+    private let pitchStemControl = NSSegmentedControl(labels: ["原音", "人声", "背景音"], trackingMode: .selectOne, target: nil, action: nil)
     private let pitchDirectionControl = NSSegmentedControl(labels: ["上升", "下降"], trackingMode: .selectOne, target: nil, action: nil)
     private let pitchSemitoneStepper = NSStepper()
     private let pitchSemitoneField = NSTextField()
@@ -409,6 +410,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         choosePitchInputButton.action = #selector(choosePitchInput)
         choosePitchOutputButton.target = self
         choosePitchOutputButton.action = #selector(choosePitchOutput)
+        pitchStemControl.target = self
+        pitchStemControl.action = #selector(pitchOptionsChanged)
         pitchDirectionControl.target = self
         pitchDirectionControl.action = #selector(pitchOptionsChanged)
         pitchSemitoneStepper.target = self
@@ -447,6 +450,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         pitchOutputField.placeholderString = "/path/to/output.mp3"
         pitchInputField.lineBreakMode = .byTruncatingMiddle
         pitchOutputField.lineBreakMode = .byTruncatingMiddle
+        pitchStemControl.selectedSegment = 0
         pitchDirectionControl.selectedSegment = 0
 
         pitchSemitoneStepper.minValue = 1
@@ -476,6 +480,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         outputRow.alignment = .centerY
 
         let optionRow = NSStackView(views: [
+            NSTextField(labelWithString: "调音音源"),
+            pitchStemControl,
             NSTextField(labelWithString: "音调"),
             pitchDirectionControl,
             NSTextField(labelWithString: "半音"),
@@ -855,7 +861,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             logger.log(.info, event: "pitch_shift.started", details: [
                 "source": request.sourceURL.path,
                 "output": request.outputURL.path,
-                "pitch": "\(request.pitchValue)"
+                "pitch": "\(request.pitchValue)",
+                "stem": request.stemSelection.rawValue
             ])
 
             Task { @MainActor in
@@ -874,7 +881,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
                     logger.log(.info, event: "pitch_shift.succeeded", details: [
                         "source": request.sourceURL.path,
                         "output": request.outputURL.path,
-                        "pitch": "\(request.pitchValue)"
+                        "pitch": "\(request.pitchValue)",
+                        "stem": request.stemSelection.rawValue
                     ])
                     pitchOutputURL = request.outputURL
                     pitchOutputField.stringValue = request.outputURL.path
@@ -1150,7 +1158,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             sourceURL: pitchInputURL,
             outputURL: output,
             direction: pitchDirection(),
-            semitones: pitchSemitoneCount()
+            semitones: pitchSemitoneCount(),
+            stemSelection: pitchStemSelection()
         )
     }
 
@@ -1169,6 +1178,14 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         pitchDirection() == .up ? "上升" : "下降"
     }
 
+    private func pitchStemSelection() -> AudioStemSelection {
+        switch pitchStemControl.selectedSegment {
+        case 1: return .vocals
+        case 2: return .accompaniment
+        default: return .original
+        }
+    }
+
     private func pitchSemitoneCount() -> Int {
         max(1, min(24, pitchSemitoneField.integerValue))
     }
@@ -1184,7 +1201,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         let baseName = input.deletingPathExtension().lastPathComponent
         return input
             .deletingLastPathComponent()
-            .appendingPathComponent("\(baseName)-pitch-\(suffix)-\(pitchSemitoneCount())")
+            .appendingPathComponent("\(baseName)-\(pitchStemSelection().outputSuffix)-pitch-\(suffix)-\(pitchSemitoneCount())")
             .appendingPathExtension("mp3")
     }
 
@@ -1220,6 +1237,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         pitchOutputField.isEnabled = !active
         choosePitchInputButton.isEnabled = !active
         choosePitchOutputButton.isEnabled = !active
+        pitchStemControl.isEnabled = !active
         pitchDirectionControl.isEnabled = !active
         pitchSemitoneField.isEnabled = !active
         pitchSemitoneStepper.isEnabled = !active

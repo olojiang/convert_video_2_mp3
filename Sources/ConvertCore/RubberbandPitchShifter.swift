@@ -17,12 +17,20 @@ public struct PitchShiftRequest: Equatable {
     public let outputURL: URL
     public let direction: PitchShiftDirection
     public let semitones: Int
+    public let stemSelection: AudioStemSelection
 
-    public init(sourceURL: URL, outputURL: URL, direction: PitchShiftDirection, semitones: Int) {
+    public init(
+        sourceURL: URL,
+        outputURL: URL,
+        direction: PitchShiftDirection,
+        semitones: Int,
+        stemSelection: AudioStemSelection = .original
+    ) {
         self.sourceURL = sourceURL
         self.outputURL = outputURL
         self.direction = direction
         self.semitones = semitones
+        self.stemSelection = stemSelection
     }
 
     public var pitchValue: Int {
@@ -30,12 +38,36 @@ public struct PitchShiftRequest: Equatable {
     }
 }
 
+public enum AudioStemSelection: String, Codable, Equatable, CaseIterable {
+    case original
+    case vocals
+    case accompaniment
+
+    public var outputSuffix: String {
+        switch self {
+        case .original: return "original"
+        case .vocals: return "vocals"
+        case .accompaniment: return "background"
+        }
+    }
+
+    fileprivate var demucsOutputFileName: String? {
+        switch self {
+        case .original: return nil
+        case .vocals: return "vocals.wav"
+        case .accompaniment: return "no_vocals.wav"
+        }
+    }
+}
+
 public enum PitchShiftError: Error, Equatable, LocalizedError {
     case cancelled
     case ffmpegNotFound
     case rubberbandNotFound
+    case demucsNotFound
     case invalidSource
     case invalidSemitoneCount
+    case separatedStemMissing(String)
     case commandFailed(String, Int32, String)
 
     public var errorDescription: String? {
@@ -46,10 +78,14 @@ public enum PitchShiftError: Error, Equatable, LocalizedError {
             return "ffmpeg was not found. Install it with Homebrew: brew install ffmpeg."
         case .rubberbandNotFound:
             return "rubberband was not found. Install it with Homebrew: brew install rubberband."
+        case .demucsNotFound:
+            return "Demucs was not found. Install it with pipx install demucs, or python3 -m pip install -U demucs."
         case .invalidSource:
             return "请选择一个已存在的 MP3 文件。"
         case .invalidSemitoneCount:
             return "半音数量必须大于 0。"
+        case let .separatedStemMissing(path):
+            return "Demucs 分离完成后没有找到目标音轨：\(path)"
         case let .commandFailed(tool, code, output):
             return "\(tool) failed with exit code \(code): \(output)"
         }
@@ -59,15 +95,18 @@ public enum PitchShiftError: Error, Equatable, LocalizedError {
 public final class RubberbandPitchShifter {
     private let ffmpegURL: URL?
     private let rubberbandURL: URL?
+    private let demucsURL: URL?
     private let runner: ProcessRunning
 
     public init(
         ffmpegURL: URL? = FFmpegLocator.find(),
         rubberbandURL: URL? = RubberbandLocator.find(),
+        demucsURL: URL? = DemucsLocator.find(),
         runner: ProcessRunning = ProcessCommandRunner()
     ) {
         self.ffmpegURL = ffmpegURL
         self.rubberbandURL = rubberbandURL
+        self.demucsURL = demucsURL
         self.runner = runner
     }
 
@@ -88,6 +127,9 @@ public final class RubberbandPitchShifter {
         }
         guard let rubberbandURL else {
             throw PitchShiftError.rubberbandNotFound
+        }
+        if request.stemSelection != .original, demucsURL == nil {
+            throw PitchShiftError.demucsNotFound
         }
 
         try FileManager.default.createDirectory(
@@ -113,13 +155,35 @@ public final class RubberbandPitchShifter {
             throw PitchShiftError.cancelled
         }
 
+        let pitchSourceURL: URL
+        let totalSteps = request.stemSelection == .original ? 3.0 : 4.0
+        var completedSteps = 0.0
+
+        if request.stemSelection == .original {
+            pitchSourceURL = request.sourceURL
+        } else {
+            guard let demucsURL else {
+                throw PitchShiftError.demucsNotFound
+            }
+            pitchSourceURL = try await separateStem(
+                source: request.sourceURL,
+                stemSelection: request.stemSelection,
+                outputDirectory: workDirectory.appendingPathComponent("separated", isDirectory: true),
+                demucsURL: demucsURL,
+                cancellation: cancellation
+            )
+            completedSteps += 1
+            progress(completedSteps / totalSteps)
+        }
+
         try await run(
             tool: "ffmpeg",
             executableURL: ffmpegURL,
-            arguments: ["-hide_banner", "-nostats", "-y", "-i", request.sourceURL.path, inputWAV.path],
+            arguments: ["-hide_banner", "-nostats", "-y", "-i", pitchSourceURL.path, inputWAV.path],
             cancellation: cancellation
         )
-        progress(1.0 / 3.0)
+        completedSteps += 1
+        progress(completedSteps / totalSteps)
 
         try await run(
             tool: "rubberband",
@@ -127,7 +191,8 @@ public final class RubberbandPitchShifter {
             arguments: ["-p", "\(request.pitchValue)", inputWAV.path, outputWAV.path],
             cancellation: cancellation
         )
-        progress(2.0 / 3.0)
+        completedSteps += 1
+        progress(completedSteps / totalSteps)
 
         try await run(
             tool: "ffmpeg",
@@ -175,6 +240,44 @@ public final class RubberbandPitchShifter {
             throw PitchShiftError.commandFailed(tool, result.exitCode, result.output)
         }
     }
+
+    private func separateStem(
+        source: URL,
+        stemSelection: AudioStemSelection,
+        outputDirectory: URL,
+        demucsURL: URL,
+        cancellation: CancellationChecking
+    ) async throws -> URL {
+        guard let outputFileName = stemSelection.demucsOutputFileName else {
+            return source
+        }
+
+        try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+        try await run(
+            tool: "demucs",
+            executableURL: demucsURL,
+            arguments: [
+                "--two-stems",
+                "vocals",
+                "--name",
+                "htdemucs",
+                "--out",
+                outputDirectory.path,
+                source.path
+            ],
+            cancellation: cancellation
+        )
+
+        let separatedURL = outputDirectory
+            .appendingPathComponent("htdemucs", isDirectory: true)
+            .appendingPathComponent(source.deletingPathExtension().lastPathComponent, isDirectory: true)
+            .appendingPathComponent(outputFileName)
+
+        guard FileManager.default.fileExists(atPath: separatedURL.path) else {
+            throw PitchShiftError.separatedStemMissing(separatedURL.path)
+        }
+        return separatedURL
+    }
 }
 
 public enum RubberbandLocator {
@@ -183,6 +286,20 @@ public enum RubberbandLocator {
             "/opt/homebrew/bin/rubberband",
             "/usr/local/bin/rubberband",
             "/usr/bin/rubberband"
+        ]
+        return candidates
+            .map(URL.init(fileURLWithPath:))
+            .first { FileManager.default.isExecutableFile(atPath: $0.path) }
+    }
+}
+
+public enum DemucsLocator {
+    public static func find() -> URL? {
+        let candidates = [
+            "/opt/homebrew/bin/demucs",
+            "/usr/local/bin/demucs",
+            "/usr/bin/demucs",
+            "\(NSHomeDirectory())/.local/bin/demucs"
         ]
         return candidates
             .map(URL.init(fileURLWithPath:))

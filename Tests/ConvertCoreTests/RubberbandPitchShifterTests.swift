@@ -13,6 +13,7 @@ struct RubberbandPitchShifterTests {
         let shifter = RubberbandPitchShifter(
             ffmpegURL: URL(fileURLWithPath: "/usr/bin/ffmpeg"),
             rubberbandURL: URL(fileURLWithPath: "/usr/bin/rubberband"),
+            demucsURL: URL(fileURLWithPath: "/usr/bin/demucs"),
             runner: runner
         )
 
@@ -44,6 +45,7 @@ struct RubberbandPitchShifterTests {
         let shifter = RubberbandPitchShifter(
             ffmpegURL: URL(fileURLWithPath: "/usr/bin/ffmpeg"),
             rubberbandURL: URL(fileURLWithPath: "/usr/bin/rubberband"),
+            demucsURL: URL(fileURLWithPath: "/usr/bin/demucs"),
             runner: runner
         )
 
@@ -66,6 +68,7 @@ struct RubberbandPitchShifterTests {
         let shifter = RubberbandPitchShifter(
             ffmpegURL: URL(fileURLWithPath: "/usr/bin/ffmpeg"),
             rubberbandURL: URL(fileURLWithPath: "/usr/bin/rubberband"),
+            demucsURL: URL(fileURLWithPath: "/usr/bin/demucs"),
             runner: runner
         )
 
@@ -79,6 +82,73 @@ struct RubberbandPitchShifterTests {
 
         #expect(runner.commands.isEmpty)
     }
+
+    @Test func separatesVocalsWithDemucsBeforePitchShiftingSelectedStem() async throws {
+        let root = try TemporaryDirectory()
+        let source = root.url.appendingPathComponent("song.mp3")
+        let output = root.url.appendingPathComponent("song-vocals-up-2.mp3")
+        try Data("mp3".utf8).write(to: source)
+
+        let runner = RecordingProcessRunner()
+        let shifter = RubberbandPitchShifter(
+            ffmpegURL: URL(fileURLWithPath: "/usr/bin/ffmpeg"),
+            rubberbandURL: URL(fileURLWithPath: "/usr/bin/rubberband"),
+            demucsURL: URL(fileURLWithPath: "/usr/bin/demucs"),
+            runner: runner
+        )
+
+        var progressValues: [Double] = []
+        try await shifter.shiftPitch(
+            request: PitchShiftRequest(
+                sourceURL: source,
+                outputURL: output,
+                direction: .up,
+                semitones: 2,
+                stemSelection: .vocals
+            ),
+            cancellation: CancellationToken(),
+            progress: { progressValues.append($0) }
+        )
+
+        #expect(runner.commands.count == 4)
+        #expect(runner.commands[0].executableURL.path == "/usr/bin/demucs")
+        #expect(runner.commands[0].arguments.contains("--two-stems"))
+        #expect(runner.commands[0].arguments.contains("vocals"))
+        #expect(runner.commands[1].executableURL.path == "/usr/bin/ffmpeg")
+        #expect(runner.commands[1].arguments.contains { $0.hasSuffix("/vocals.wav") })
+        #expect(runner.commands[2].executableURL.path == "/usr/bin/rubberband")
+        #expect(runner.commands[3].executableURL.path == "/usr/bin/ffmpeg")
+        #expect(FileManager.default.fileExists(atPath: output.path))
+        #expect(progressValues == [0.25, 0.5, 0.75, 1.0])
+    }
+
+    @Test func requiresDemucsOnlyWhenStemSeparationIsRequested() async throws {
+        let root = try TemporaryDirectory()
+        let source = root.url.appendingPathComponent("song.mp3")
+        let output = root.url.appendingPathComponent("song-vocals.mp3")
+        try Data("mp3".utf8).write(to: source)
+
+        let shifter = RubberbandPitchShifter(
+            ffmpegURL: URL(fileURLWithPath: "/usr/bin/ffmpeg"),
+            rubberbandURL: URL(fileURLWithPath: "/usr/bin/rubberband"),
+            demucsURL: nil,
+            runner: RecordingProcessRunner()
+        )
+
+        await #expect(throws: PitchShiftError.demucsNotFound) {
+            try await shifter.shiftPitch(
+                request: PitchShiftRequest(
+                    sourceURL: source,
+                    outputURL: output,
+                    direction: .up,
+                    semitones: 1,
+                    stemSelection: .accompaniment
+                ),
+                cancellation: CancellationToken(),
+                progress: { _ in }
+            )
+        }
+    }
 }
 
 private final class RecordingProcessRunner: ProcessRunning {
@@ -90,9 +160,29 @@ private final class RecordingProcessRunner: ProcessRunning {
         cancellation: CancellationChecking
     ) async throws -> ProcessResult {
         commands.append((executableURL, arguments))
+        if executableURL.path.hasSuffix("/demucs") {
+            try writeDemucsOutputs(arguments: arguments)
+        }
         if let output = arguments.last, output.hasSuffix(".wav") || output.hasSuffix(".part") {
             try Data("audio".utf8).write(to: URL(fileURLWithPath: output))
         }
         return ProcessResult(exitCode: 0, output: "")
+    }
+
+    private func writeDemucsOutputs(arguments: [String]) throws {
+        guard let outIndex = arguments.firstIndex(of: "--out"),
+              arguments.indices.contains(outIndex + 1),
+              let inputPath = arguments.last else {
+            return
+        }
+
+        let outputDirectory = URL(fileURLWithPath: arguments[outIndex + 1])
+        let source = URL(fileURLWithPath: inputPath)
+        let stemDirectory = outputDirectory
+            .appendingPathComponent("htdemucs", isDirectory: true)
+            .appendingPathComponent(source.deletingPathExtension().lastPathComponent, isDirectory: true)
+        try FileManager.default.createDirectory(at: stemDirectory, withIntermediateDirectories: true)
+        try Data("vocals".utf8).write(to: stemDirectory.appendingPathComponent("vocals.wav"))
+        try Data("background".utf8).write(to: stemDirectory.appendingPathComponent("no_vocals.wav"))
     }
 }
