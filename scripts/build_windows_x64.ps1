@@ -10,7 +10,7 @@ Set-Location $RepoRoot
 
 swift --version
 
-swift build -c release --product ConvertVideo2MP3CLI
+swift build -c release --static-swift-stdlib --product ConvertVideo2MP3CLI
 if ($LASTEXITCODE -ne 0) {
     throw "swift build failed"
 }
