@@ -26,7 +26,13 @@ jobs:
         shell: pwsh
         run: |
           winget install --id Swift.Toolchain -e --source winget --accept-package-agreements --accept-source-agreements
-          $swift = Get-ChildItem -Path "$env:LOCALAPPDATA\Programs\Swift", "C:\Program Files\Swift" -Recurse -Filter "swift.exe" -ErrorAction SilentlyContinue |
+          $swiftSearchRoots = @(
+            "$env:LOCALAPPDATA\Programs\Swift",
+            "C:\Program Files\Swift",
+            "C:\Program Files (x86)\Swift",
+            "C:\Library\Developer\Toolchains"
+          )
+          $swift = Get-ChildItem -Path $swiftSearchRoots -Recurse -Filter "swift.exe" -ErrorAction SilentlyContinue |
             Select-Object -First 1
           if ($null -eq $swift) {
             throw "swift.exe was not found after installing Swift.Toolchain"
