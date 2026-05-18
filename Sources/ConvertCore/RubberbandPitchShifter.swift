@@ -407,10 +407,35 @@ public enum DemucsLocator {
             "/usr/local/bin/demucs",
             "/usr/bin/demucs",
             "\(NSHomeDirectory())/.local/bin/demucs"
-        ]
+        ] + pythonUserBaseCandidates()
         return candidates
             .map(URL.init(fileURLWithPath:))
             .first { FileManager.default.isExecutableFile(atPath: $0.path) }
+    }
+
+    private static func pythonUserBaseCandidates() -> [String] {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["python3", "-m", "site", "--user-base"]
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { return [] }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            guard let base = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !base.isEmpty else {
+                return []
+            }
+            return ["\(base)/bin/demucs"]
+        } catch {
+            return []
+        }
     }
 }
 

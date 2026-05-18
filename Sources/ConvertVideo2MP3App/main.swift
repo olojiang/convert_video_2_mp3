@@ -144,7 +144,6 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private let fileSizeReader = FileSizeReader()
     private let taskSorter = ConversionTaskSorter()
     private let mp3TrackSorter = MP3TrackSorter()
-    private let pitchShifter = RubberbandPitchShifter()
     private let historyStore = RootHistoryStore()
     private let sortPreferenceStore = TableSortPreferenceStore()
     private let mp3SortPreferenceStore = MP3SortPreferenceStore()
@@ -185,6 +184,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private let selectNoneButton = NSButton(title: "清空选择", target: nil, action: nil)
     private let startButton = NSButton(title: "开始转 MP3", target: nil, action: nil)
     private let stopButton = NSButton(title: "停止", target: nil, action: nil)
+    private let dependencyCheckButton = NSButton(title: "检查依赖", target: nil, action: nil)
     private let revealLogsButton = NSButton(title: "打开日志", target: nil, action: nil)
     private let cleanPartFoldersButton = NSButton(title: "清理 .mp4.part 文件夹", target: nil, action: nil)
     private let shortcutHelpButton = NSButton()
@@ -268,6 +268,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             deleteSourceCheckbox,
             startButton,
             stopButton,
+            dependencyCheckButton,
             cleanPartFoldersButton,
             previousTrackButton,
             rewind30Button,
@@ -394,6 +395,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         startButton.action = #selector(startConversion)
         stopButton.target = self
         stopButton.action = #selector(stopConversion)
+        dependencyCheckButton.target = self
+        dependencyCheckButton.action = #selector(checkDependencies)
         revealLogsButton.target = self
         revealLogsButton.action = #selector(revealLogs)
         cleanPartFoldersButton.target = self
@@ -478,6 +481,17 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         pitchLogTextView.textColor = .labelColor
         pitchLogTextView.backgroundColor = .textBackgroundColor
         pitchLogTextView.textContainerInset = NSSize(width: 8, height: 8)
+        pitchLogTextView.frame = NSRect(x: 0, y: 0, width: 900, height: 260)
+        pitchLogTextView.minSize = NSSize(width: 0, height: 260)
+        pitchLogTextView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        pitchLogTextView.isVerticallyResizable = true
+        pitchLogTextView.isHorizontallyResizable = true
+        pitchLogTextView.autoresizingMask = [.width]
+        pitchLogTextView.textContainer?.containerSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        pitchLogTextView.textContainer?.widthTracksTextView = false
         pitchLogTextView.string = "调音日志会显示在这里，可选中复制。"
         pitchLogScrollView.documentView = pitchLogTextView
         pitchLogScrollView.hasVerticalScroller = true
@@ -632,6 +646,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         deleteSourceCheckbox.isHidden = !conversionMode
         startButton.isHidden = !conversionMode
         stopButton.isHidden = !conversionMode
+        dependencyCheckButton.isHidden = playbackMode
         cleanPartFoldersButton.isHidden = !conversionMode
 
         previousTrackButton.isHidden = !playbackMode
@@ -648,6 +663,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             chooseButton.isEnabled = true
             rescanButton.isEnabled = rootURL != nil
             modeControl.isEnabled = true
+            dependencyCheckButton.isEnabled = true
             let hasTracks = !mp3Tracks.isEmpty
             previousTrackButton.isEnabled = hasTracks
             rewind30Button.isEnabled = hasTracks
@@ -783,6 +799,9 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         guard !isConverting else { return }
         let selectedTasks = selectedConversionTasks()
         guard !selectedTasks.isEmpty else { return }
+        guard ensureDependencies([.ffmpeg, .ffprobe], action: "视频转 MP3") else {
+            return
+        }
 
         isConverting = true
         setControlsForConversion(active: true)
@@ -818,6 +837,14 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         coordinator?.requestStop()
         stopButton.isEnabled = false
         summaryLabel.stringValue = "正在停止：等待当前 ffmpeg 进程结束或被终止"
+    }
+
+    @objc private func checkDependencies() {
+        let report = ExternalDependencyReport.current()
+        logger.log(.info, event: "dependencies.checked", details: [
+            "missing": report.missing.map(\.rawValue).joined(separator: ",")
+        ])
+        showDependencyReport(report, action: "完整功能")
     }
 
     @objc private func choosePitchInput() {
@@ -893,6 +920,9 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
         do {
             let request = try makePitchShiftRequest()
+            guard ensureDependencies(requiredDependencies(for: request), action: request.processingMode == .exportOnly ? "导出音频" : "音乐调音") else {
+                return
+            }
             let cancellation = CancellationToken()
             pitchCancellation = cancellation
             isPitchShifting = true
@@ -914,7 +944,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
             Task { @MainActor in
                 do {
-                    try await pitchShifter.shiftPitch(
+                    try await RubberbandPitchShifter().shiftPitch(
                         request: request,
                         cancellation: cancellation,
                         progress: { [weak self] fraction in
@@ -974,6 +1004,88 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         stopPitchButton.isEnabled = false
         summaryLabel.stringValue = "正在停止：等待当前调音命令结束或被终止"
         appendPitchLog("收到停止请求，等待当前命令结束或被终止。")
+    }
+
+    private func requiredDependencies(for request: PitchShiftRequest) -> [ExternalDependency] {
+        var dependencies: [ExternalDependency] = [.ffmpeg]
+        if request.processingMode == .pitchShift {
+            dependencies.append(.rubberband)
+        }
+        if request.stemSelection != .original {
+            dependencies.append(.demucs)
+        }
+        return dependencies
+    }
+
+    private func ensureDependencies(_ dependencies: [ExternalDependency], action: String) -> Bool {
+        let report = ExternalDependencyReport.current()
+        let missing = report.missing(dependencies)
+        guard !missing.isEmpty else {
+            return true
+        }
+
+        logger.log(.warning, event: "dependencies.missing", details: [
+            "action": action,
+            "missing": missing.map(\.rawValue).joined(separator: ",")
+        ])
+        showDependencyReport(report, action: action, focusedMissing: missing)
+        return false
+    }
+
+    private func showDependencyReport(
+        _ report: ExternalDependencyReport,
+        action: String,
+        focusedMissing: [ExternalDependency]? = nil
+    ) {
+        let missing = focusedMissing ?? report.missing
+        let statusLines = report.items.map { item in
+            let status = item.executableURL?.path ?? "未安装"
+            return "\(item.dependency.displayName)：\(status)\n用途：\(item.dependency.purpose)"
+        }.joined(separator: "\n\n")
+
+        let alert = NSAlert()
+        alert.alertStyle = missing.isEmpty ? .informational : .warning
+        alert.messageText = missing.isEmpty ? "依赖完整" : "\(action)缺少依赖"
+        if missing.isEmpty {
+            alert.informativeText = statusLines
+            alert.addButton(withTitle: "好")
+        } else {
+            let installLines = missing
+                .map { "\($0.displayName)：\($0.installHint)" }
+                .joined(separator: "\n")
+            alert.informativeText = """
+            当前电脑还缺少这些命令行工具：
+
+            \(installLines)
+
+            详细状态：
+
+            \(statusLines)
+            """
+            alert.addButton(withTitle: "打开安装脚本")
+            alert.addButton(withTitle: "取消")
+        }
+
+        if alert.runModal() == .alertFirstButtonReturn, !missing.isEmpty {
+            openDependencyInstaller(for: missing)
+        }
+    }
+
+    private func openDependencyInstaller(for missing: [ExternalDependency]) {
+        do {
+            let scriptURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("ConvertVideo2MP3-install-dependencies.command")
+            let script = ExternalDependencyInstallerScript.make(for: missing)
+            try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: scriptURL.path
+            )
+            NSWorkspace.shared.open(scriptURL)
+            showMessage(title: "安装脚本已打开", text: "请在 Terminal 中按提示完成安装。安装完成后回到 app 点击“检查依赖”，或直接重新执行当前操作。")
+        } catch {
+            showError(error)
+        }
     }
 
     @objc private func revealPitchOutput() {
@@ -1368,12 +1480,14 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         stopButton.isEnabled = active
         concurrencyPopup.isEnabled = !active
         deleteSourceCheckbox.isEnabled = !active
+        dependencyCheckButton.isEnabled = !active
         cleanPartFoldersButton.isEnabled = !active
         updateProgressSeekability()
     }
 
     private func setControlsForPitchShift(active: Bool) {
         modeControl.isEnabled = !active
+        dependencyCheckButton.isEnabled = !active
         pitchInputField.isEnabled = !active
         pitchOutputField.isEnabled = !active
         choosePitchInputButton.isEnabled = !active
