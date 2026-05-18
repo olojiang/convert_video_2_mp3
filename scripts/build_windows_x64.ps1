@@ -10,28 +10,32 @@ Set-Location $RepoRoot
 
 swift test --filter ExternalDependencyCheckTests
 swift build -c release --product ConvertVideo2MP3CLI
+$BinPath = swift build -c release --product ConvertVideo2MP3CLI --show-bin-path
 
 if (Test-Path $PackageRoot) {
     Remove-Item -Recurse -Force $PackageRoot
 }
 New-Item -ItemType Directory -Force $PackageRoot | Out-Null
 
-$Exe = Get-ChildItem -Path (Join-Path $RepoRoot ".build") -Recurse -Filter "ConvertVideo2MP3CLI.exe" |
-    Where-Object { $_.FullName -match "[\\/]release[\\/]" } |
-    Select-Object -First 1
-
-if ($null -eq $Exe) {
-    throw "Unable to find ConvertVideo2MP3CLI.exe under .build"
+$ExePath = Join-Path $BinPath "ConvertVideo2MP3CLI.exe"
+if (!(Test-Path $ExePath)) {
+    $ExePath = Join-Path $BinPath "ConvertVideo2MP3CLI"
 }
 
-Copy-Item $Exe.FullName (Join-Path $PackageRoot "ConvertVideo2MP3CLI.exe")
+if (!(Test-Path $ExePath)) {
+    Write-Host "SwiftPM bin path: $BinPath"
+    Get-ChildItem -Path $BinPath -ErrorAction SilentlyContinue | Format-Table -AutoSize
+    throw "Unable to find ConvertVideo2MP3CLI executable in SwiftPM bin path"
+}
+
+Copy-Item $ExePath (Join-Path $PackageRoot "ConvertVideo2MP3CLI.exe")
 
 $SwiftCommand = Get-Command swift -ErrorAction Stop
 $SwiftBin = Split-Path $SwiftCommand.Source -Parent
 Get-ChildItem -Path $SwiftBin -Filter "*.dll" -ErrorAction SilentlyContinue |
     Copy-Item -Destination $PackageRoot -Force
 
-Get-ChildItem -Path $Exe.DirectoryName -Filter "*.dll" -ErrorAction SilentlyContinue |
+Get-ChildItem -Path $BinPath -Filter "*.dll" -ErrorAction SilentlyContinue |
     Copy-Item -Destination $PackageRoot -Force
 
 @"
