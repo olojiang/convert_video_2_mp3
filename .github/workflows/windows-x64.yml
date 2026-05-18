@@ -16,7 +16,7 @@ on:
 jobs:
   build:
     name: Build Windows x64 CLI
-    runs-on: windows-latest
+    runs-on: windows-2022
 
     steps:
       - name: Checkout
@@ -26,15 +26,22 @@ jobs:
         shell: pwsh
         run: |
           winget install --id Swift.Toolchain -e --source winget --accept-package-agreements --accept-source-agreements
-          $swiftBin = "$env:LOCALAPPDATA\Programs\Swift\Toolchains\*\usr\bin"
-          $resolved = Resolve-Path $swiftBin | Select-Object -First 1
-          if ($null -ne $resolved) {
-            "$resolved" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $swift = Get-ChildItem -Path "$env:LOCALAPPDATA\Programs\Swift", "C:\Program Files\Swift" -Recurse -Filter "swift.exe" -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if ($null -eq $swift) {
+            throw "swift.exe was not found after installing Swift.Toolchain"
           }
+          $swiftBin = Split-Path $swift.FullName -Parent
+          "$swiftBin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "SWIFT_BIN=$swiftBin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          & $swift.FullName --version
 
       - name: Build package
         shell: pwsh
-        run: ./scripts/build_windows_x64.ps1
+        run: |
+          where.exe swift
+          swift --version
+          ./scripts/build_windows_x64.ps1
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
