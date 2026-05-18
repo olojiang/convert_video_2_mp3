@@ -16,7 +16,7 @@ on:
 jobs:
   build:
     name: Build Windows x64 CLI
-    runs-on: windows-2022
+    runs-on: windows-latest
 
     steps:
       - name: Checkout
