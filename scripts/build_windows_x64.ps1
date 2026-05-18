@@ -54,11 +54,6 @@ if ($null -eq $ExePath -or !(Test-Path $ExePath)) {
 
 Copy-Item $ExePath (Join-Path $PackageRoot "ConvertVideo2MP3CLI.exe")
 
-$SwiftCommand = Get-Command swift -ErrorAction Stop
-$SwiftBin = Split-Path $SwiftCommand.Source -Parent
-Get-ChildItem -Path $SwiftBin -Filter "*.dll" -ErrorAction SilentlyContinue |
-    Copy-Item -Destination $PackageRoot -Force
-
 if (![string]::IsNullOrWhiteSpace($BinPath)) {
     Get-ChildItem -Path $BinPath -Filter "*.dll" -ErrorAction SilentlyContinue |
         Copy-Item -Destination $PackageRoot -Force
