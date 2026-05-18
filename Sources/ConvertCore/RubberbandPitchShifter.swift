@@ -101,6 +101,17 @@ public enum PitchShiftError: Error, Equatable, LocalizedError {
 }
 
 public final class RubberbandPitchShifter {
+    private static let mp3EncodingArguments = [
+        "-codec:a",
+        "libmp3lame",
+        "-b:a",
+        "320k",
+        "-f",
+        "mp3"
+    ]
+    private static let demucsModelName = "htdemucs"
+    private static let demucsHighQualityShifts = "4"
+
     private let ffmpegURL: URL?
     private let rubberbandURL: URL?
     private let demucsURL: URL?
@@ -203,13 +214,8 @@ public final class RubberbandPitchShifter {
                     "-nostats",
                     "-y",
                     "-i",
-                    pitchSourceURL.path,
-                    "-codec:a",
-                    "libmp3lame",
-                    "-q:a",
-                    "2",
-                    "-f",
-                    "mp3",
+                    pitchSourceURL.path
+                ] + Self.mp3EncodingArguments + [
                     tempMP3.path
                 ],
                 cancellation: cancellation
@@ -253,13 +259,8 @@ public final class RubberbandPitchShifter {
                 "-nostats",
                 "-y",
                 "-i",
-                outputWAV.path,
-                "-codec:a",
-                "libmp3lame",
-                "-q:a",
-                "2",
-                "-f",
-                "mp3",
+                outputWAV.path
+            ] + Self.mp3EncodingArguments + [
                 tempMP3.path
             ],
             cancellation: cancellation
@@ -311,7 +312,9 @@ public final class RubberbandPitchShifter {
                 "--two-stems",
                 "vocals",
                 "--name",
-                "htdemucs",
+                Self.demucsModelName,
+                "--shifts",
+                Self.demucsHighQualityShifts,
                 "--out",
                 outputDirectory.path,
                 source.path
@@ -320,7 +323,7 @@ public final class RubberbandPitchShifter {
         )
 
         let separatedURL = outputDirectory
-            .appendingPathComponent("htdemucs", isDirectory: true)
+            .appendingPathComponent(Self.demucsModelName, isDirectory: true)
             .appendingPathComponent(source.deletingPathExtension().lastPathComponent, isDirectory: true)
             .appendingPathComponent(outputFileName)
 

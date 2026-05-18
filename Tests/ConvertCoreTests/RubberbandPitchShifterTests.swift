@@ -30,6 +30,8 @@ struct RubberbandPitchShifterTests {
         #expect(runner.commands[1].executableURL.path == "/usr/bin/rubberband")
         #expect(Array(runner.commands[1].arguments[0...1]) == ["-p", "2"])
         #expect(runner.commands[2].executableURL.path == "/usr/bin/ffmpeg")
+        #expect(argumentValue(after: "-b:a", in: runner.commands[2].arguments) == "320k")
+        #expect(!runner.commands[2].arguments.contains("-q:a"))
         #expect(runner.commands[2].arguments.contains { $0.hasSuffix(".song-up-2.mp3.part") })
         #expect(FileManager.default.fileExists(atPath: output.path))
         #expect(progressValues == [1.0 / 3.0, 2.0 / 3.0, 1.0])
@@ -114,10 +116,14 @@ struct RubberbandPitchShifterTests {
         #expect(runner.commands[0].executableURL.path == "/usr/bin/demucs")
         #expect(runner.commands[0].arguments.contains("--two-stems"))
         #expect(runner.commands[0].arguments.contains("vocals"))
+        #expect(argumentValue(after: "--name", in: runner.commands[0].arguments) == "htdemucs")
+        #expect(argumentValue(after: "--shifts", in: runner.commands[0].arguments) == "4")
         #expect(runner.commands[1].executableURL.path == "/usr/bin/ffmpeg")
         #expect(runner.commands[1].arguments.contains { $0.hasSuffix("/vocals.wav") })
         #expect(runner.commands[2].executableURL.path == "/usr/bin/rubberband")
         #expect(runner.commands[3].executableURL.path == "/usr/bin/ffmpeg")
+        #expect(argumentValue(after: "-b:a", in: runner.commands[3].arguments) == "320k")
+        #expect(!runner.commands[3].arguments.contains("-q:a"))
         #expect(FileManager.default.fileExists(atPath: output.path))
         #expect(progressValues == [0.25, 0.5, 0.75, 1.0])
     }
@@ -180,7 +186,10 @@ struct RubberbandPitchShifterTests {
 
         #expect(runner.commands.count == 2)
         #expect(runner.commands[0].executableURL.path == "/usr/bin/demucs")
+        #expect(argumentValue(after: "--shifts", in: runner.commands[0].arguments) == "4")
         #expect(runner.commands[1].executableURL.path == "/usr/bin/ffmpeg")
+        #expect(argumentValue(after: "-b:a", in: runner.commands[1].arguments) == "320k")
+        #expect(!runner.commands[1].arguments.contains("-q:a"))
         #expect(runner.commands[1].arguments.contains { $0.hasSuffix("/no_vocals.wav") })
         #expect(!runner.commands.contains { $0.executableURL.path == "/usr/bin/rubberband" })
         #expect(FileManager.default.fileExists(atPath: output.path))
@@ -216,9 +225,19 @@ struct RubberbandPitchShifterTests {
 
         #expect(runner.commands.count == 1)
         #expect(runner.commands[0].executableURL.path == "/usr/bin/ffmpeg")
+        #expect(argumentValue(after: "-b:a", in: runner.commands[0].arguments) == "320k")
+        #expect(!runner.commands[0].arguments.contains("-q:a"))
         #expect(FileManager.default.fileExists(atPath: output.path))
         #expect(progressValues == [1.0])
     }
+}
+
+private func argumentValue(after flag: String, in arguments: [String]) -> String? {
+    guard let index = arguments.firstIndex(of: flag),
+          arguments.indices.contains(index + 1) else {
+        return nil
+    }
+    return arguments[index + 1]
 }
 
 private final class RecordingProcessRunner: ProcessRunning {
