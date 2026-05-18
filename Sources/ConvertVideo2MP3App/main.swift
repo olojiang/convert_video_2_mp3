@@ -149,6 +149,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private let sortPreferenceStore = TableSortPreferenceStore()
     private let mp3SortPreferenceStore = MP3SortPreferenceStore()
     private let viewPreferenceStore = ViewPreferenceStore()
+    private let pitchPreferenceStore = PitchShiftPreferenceStore()
     private let logger: FileEventLogger
     private var stateStore: TaskStateStore?
     private var coordinator: ConversionCoordinator?
@@ -168,6 +169,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private var lastPeriodicPlaybackSave = Date.distantPast
     private var pitchInputURL: URL?
     private var pitchOutputURL: URL?
+    private var isPitchOutputManuallyChosen = false
     private var isPitchShifting = false
     private var pitchCancellation: CancellationToken?
 
@@ -296,6 +298,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             self?.seekMP3(toProgress: ratio)
         }
         configurePitchPanel()
+        restorePitchPreferences()
 
         tableView.dataSource = self
         tableView.delegate = self
@@ -410,6 +413,10 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         choosePitchInputButton.action = #selector(choosePitchInput)
         choosePitchOutputButton.target = self
         choosePitchOutputButton.action = #selector(choosePitchOutput)
+        pitchInputField.target = self
+        pitchInputField.action = #selector(pitchPathFieldChanged)
+        pitchOutputField.target = self
+        pitchOutputField.action = #selector(pitchPathFieldChanged)
         pitchStemControl.target = self
         pitchStemControl.action = #selector(pitchOptionsChanged)
         pitchDirectionControl.target = self
@@ -806,6 +813,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             let output = defaultPitchOutputURL(for: url)
             pitchOutputURL = output
             pitchOutputField.stringValue = output.path
+            isPitchOutputManuallyChosen = false
+            savePitchPreferences()
             refresh()
         }
     }
@@ -822,17 +831,28 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         if panel.runModal() == .OK, let url = panel.url {
             pitchOutputURL = url
             pitchOutputField.stringValue = url.path
+            isPitchOutputManuallyChosen = true
+            savePitchPreferences()
             refresh()
         }
     }
 
+    @objc private func pitchPathFieldChanged() {
+        updatePitchURLsFromFields()
+        isPitchOutputManuallyChosen = !pitchOutputField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        savePitchPreferences()
+        refresh()
+    }
+
     @objc private func pitchOptionsChanged() {
         syncPitchSemitoneControls()
-        if let input = pitchInputURL, pitchOutputField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        updatePitchURLsFromFields()
+        if let input = pitchInputURL, !isPitchOutputManuallyChosen {
             let output = defaultPitchOutputURL(for: input)
             pitchOutputURL = output
             pitchOutputField.stringValue = output.path
         }
+        savePitchPreferences()
         refresh()
     }
 
@@ -864,6 +884,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
                 "pitch": "\(request.pitchValue)",
                 "stem": request.stemSelection.rawValue
             ])
+            savePitchPreferences()
 
             Task { @MainActor in
                 do {
@@ -905,6 +926,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
                 isPitchShifting = false
                 pitchCancellation = nil
+                savePitchPreferences()
                 setControlsForPitchShift(active: false)
             }
         } catch {
@@ -1186,6 +1208,21 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         }
     }
 
+    private func selectPitchDirection(_ direction: PitchShiftDirection) {
+        pitchDirectionControl.selectedSegment = direction == .down ? 1 : 0
+    }
+
+    private func selectPitchStem(_ stem: AudioStemSelection) {
+        switch stem {
+        case .original:
+            pitchStemControl.selectedSegment = 0
+        case .vocals:
+            pitchStemControl.selectedSegment = 1
+        case .accompaniment:
+            pitchStemControl.selectedSegment = 2
+        }
+    }
+
     private func pitchSemitoneCount() -> Int {
         max(1, min(24, pitchSemitoneField.integerValue))
     }
@@ -1203,6 +1240,45 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             .deletingLastPathComponent()
             .appendingPathComponent("\(baseName)-\(pitchStemSelection().outputSuffix)-pitch-\(suffix)-\(pitchSemitoneCount())")
             .appendingPathExtension("mp3")
+    }
+
+    private func restorePitchPreferences() {
+        let preferences = pitchPreferenceStore.load()
+
+        if let inputPath = preferences.inputPath, !inputPath.isEmpty {
+            let input = URL(fileURLWithPath: (inputPath as NSString).expandingTildeInPath)
+            pitchInputURL = input
+            pitchInputField.stringValue = input.path
+        }
+
+        selectPitchStem(preferences.stemSelection)
+        selectPitchDirection(preferences.direction)
+        pitchSemitoneField.integerValue = preferences.semitones
+        syncPitchSemitoneControls()
+        isPitchOutputManuallyChosen = preferences.outputManuallyChosen
+
+        if let outputPath = preferences.outputPath, !outputPath.isEmpty {
+            let output = URL(fileURLWithPath: (outputPath as NSString).expandingTildeInPath)
+            pitchOutputURL = output
+            pitchOutputField.stringValue = output.path
+        } else if let pitchInputURL {
+            let output = defaultPitchOutputURL(for: pitchInputURL)
+            pitchOutputURL = output
+            pitchOutputField.stringValue = output.path
+            isPitchOutputManuallyChosen = false
+        }
+    }
+
+    private func savePitchPreferences() {
+        updatePitchURLsFromFields()
+        pitchPreferenceStore.save(PitchShiftPreferences(
+            inputPath: pitchInputURL?.path,
+            outputPath: pitchOutputURL?.path,
+            stemSelection: pitchStemSelection(),
+            direction: pitchDirection(),
+            semitones: pitchSemitoneCount(),
+            outputManuallyChosen: isPitchOutputManuallyChosen
+        ))
     }
 
     private func selectedConversionTasks() -> [ConversionTask] {
@@ -1370,6 +1446,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         viewPreferenceStore.save(appMode)
         sortPreferenceStore.save(sortPreference)
         mp3SortPreferenceStore.save(mp3SortPreference)
+        savePitchPreferences()
         saveCurrentPlaybackPosition()
     }
 
@@ -1953,6 +2030,63 @@ private struct ViewPreferenceStore {
 
     func save(_ mode: AppMode) {
         defaults.set(mode.rawValue, forKey: key)
+    }
+}
+
+private struct PitchShiftPreferences: Codable, Equatable {
+    var inputPath: String?
+    var outputPath: String?
+    var stemSelection: AudioStemSelection
+    var direction: PitchShiftDirection
+    var semitones: Int
+    var outputManuallyChosen: Bool
+
+    init(
+        inputPath: String? = nil,
+        outputPath: String? = nil,
+        stemSelection: AudioStemSelection = .original,
+        direction: PitchShiftDirection = .up,
+        semitones: Int = 2,
+        outputManuallyChosen: Bool = false
+    ) {
+        self.inputPath = inputPath
+        self.outputPath = outputPath
+        self.stemSelection = stemSelection
+        self.direction = direction
+        self.semitones = max(1, min(24, semitones))
+        self.outputManuallyChosen = outputManuallyChosen
+    }
+}
+
+private struct PitchShiftPreferenceStore {
+    private let key: String
+    private let defaults: UserDefaults
+    private let encoder = JSONEncoder()
+    private let decoder = JSONDecoder()
+
+    init(key: String = "pitchShiftPreferences", defaults: UserDefaults = .standard) {
+        self.key = key
+        self.defaults = defaults
+    }
+
+    func load() -> PitchShiftPreferences {
+        guard let data = defaults.data(forKey: key),
+              let preferences = try? decoder.decode(PitchShiftPreferences.self, from: data) else {
+            return PitchShiftPreferences()
+        }
+        return PitchShiftPreferences(
+            inputPath: preferences.inputPath,
+            outputPath: preferences.outputPath,
+            stemSelection: preferences.stemSelection,
+            direction: preferences.direction,
+            semitones: preferences.semitones,
+            outputManuallyChosen: preferences.outputManuallyChosen
+        )
+    }
+
+    func save(_ preferences: PitchShiftPreferences) {
+        guard let data = try? encoder.encode(preferences) else { return }
+        defaults.set(data, forKey: key)
     }
 }
 
