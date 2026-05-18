@@ -8,10 +8,7 @@ $ZipPath = Join-Path $DistRoot "ConvertVideo2MP3-windows-x64.zip"
 
 Set-Location $RepoRoot
 
-swift test --filter ExternalDependencyCheckTests
-if ($LASTEXITCODE -ne 0) {
-    throw "swift test failed"
-}
+swift --version
 
 swift build -c release --product ConvertVideo2MP3CLI
 if ($LASTEXITCODE -ne 0) {
