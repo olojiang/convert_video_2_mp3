@@ -18,24 +18,32 @@ public struct PitchShiftRequest: Equatable {
     public let direction: PitchShiftDirection
     public let semitones: Int
     public let stemSelection: AudioStemSelection
+    public let processingMode: AudioProcessingMode
 
     public init(
         sourceURL: URL,
         outputURL: URL,
         direction: PitchShiftDirection,
         semitones: Int,
-        stemSelection: AudioStemSelection = .original
+        stemSelection: AudioStemSelection = .original,
+        processingMode: AudioProcessingMode = .pitchShift
     ) {
         self.sourceURL = sourceURL
         self.outputURL = outputURL
         self.direction = direction
         self.semitones = semitones
         self.stemSelection = stemSelection
+        self.processingMode = processingMode
     }
 
     public var pitchValue: Int {
         direction.sign * semitones
     }
+}
+
+public enum AudioProcessingMode: String, Codable, Equatable, CaseIterable {
+    case exportOnly
+    case pitchShift
 }
 
 public enum AudioStemSelection: String, Codable, Equatable, CaseIterable {
@@ -119,13 +127,13 @@ public final class RubberbandPitchShifter {
               request.sourceURL.pathExtension.lowercased() == "mp3" else {
             throw PitchShiftError.invalidSource
         }
-        guard request.semitones > 0 else {
+        guard request.processingMode == .exportOnly || request.semitones > 0 else {
             throw PitchShiftError.invalidSemitoneCount
         }
         guard let ffmpegURL else {
             throw PitchShiftError.ffmpegNotFound
         }
-        guard let rubberbandURL else {
+        if request.processingMode == .pitchShift, rubberbandURL == nil {
             throw PitchShiftError.rubberbandNotFound
         }
         if request.stemSelection != .original, demucsURL == nil {
@@ -156,7 +164,17 @@ public final class RubberbandPitchShifter {
         }
 
         let pitchSourceURL: URL
-        let totalSteps = request.stemSelection == .original ? 3.0 : 4.0
+        let totalSteps: Double
+        switch (request.stemSelection, request.processingMode) {
+        case (.original, .exportOnly):
+            totalSteps = 1
+        case (_, .exportOnly):
+            totalSteps = 2
+        case (.original, .pitchShift):
+            totalSteps = 3
+        case (_, .pitchShift):
+            totalSteps = 4
+        }
         var completedSteps = 0.0
 
         if request.stemSelection == .original {
@@ -174,6 +192,39 @@ public final class RubberbandPitchShifter {
             )
             completedSteps += 1
             progress(completedSteps / totalSteps)
+        }
+
+        if request.processingMode == .exportOnly {
+            try await run(
+                tool: "ffmpeg",
+                executableURL: ffmpegURL,
+                arguments: [
+                    "-hide_banner",
+                    "-nostats",
+                    "-y",
+                    "-i",
+                    pitchSourceURL.path,
+                    "-codec:a",
+                    "libmp3lame",
+                    "-q:a",
+                    "2",
+                    "-f",
+                    "mp3",
+                    tempMP3.path
+                ],
+                cancellation: cancellation
+            )
+
+            if FileManager.default.fileExists(atPath: request.outputURL.path) {
+                try FileManager.default.removeItem(at: request.outputURL)
+            }
+            try FileManager.default.moveItem(at: tempMP3, to: request.outputURL)
+            progress(1)
+            return
+        }
+
+        guard let rubberbandURL else {
+            throw PitchShiftError.rubberbandNotFound
         }
 
         try await run(

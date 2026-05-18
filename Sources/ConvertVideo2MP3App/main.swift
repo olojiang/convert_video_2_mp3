@@ -204,6 +204,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private let choosePitchInputButton = NSButton(title: "选择 MP3", target: nil, action: nil)
     private let choosePitchOutputButton = NSButton(title: "输出为", target: nil, action: nil)
     private let pitchStemControl = NSSegmentedControl(labels: ["原音", "人声", "背景音"], trackingMode: .selectOne, target: nil, action: nil)
+    private let pitchProcessingModeControl = NSSegmentedControl(labels: ["只导出", "调音"], trackingMode: .selectOne, target: nil, action: nil)
     private let pitchDirectionControl = NSSegmentedControl(labels: ["上升", "下降"], trackingMode: .selectOne, target: nil, action: nil)
     private let pitchSemitoneStepper = NSStepper()
     private let pitchSemitoneField = NSTextField()
@@ -419,6 +420,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         pitchOutputField.action = #selector(pitchPathFieldChanged)
         pitchStemControl.target = self
         pitchStemControl.action = #selector(pitchOptionsChanged)
+        pitchProcessingModeControl.target = self
+        pitchProcessingModeControl.action = #selector(pitchOptionsChanged)
         pitchDirectionControl.target = self
         pitchDirectionControl.action = #selector(pitchOptionsChanged)
         pitchSemitoneStepper.target = self
@@ -458,6 +461,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         pitchInputField.lineBreakMode = .byTruncatingMiddle
         pitchOutputField.lineBreakMode = .byTruncatingMiddle
         pitchStemControl.selectedSegment = 0
+        pitchProcessingModeControl.selectedSegment = 1
         pitchDirectionControl.selectedSegment = 0
 
         pitchSemitoneStepper.minValue = 1
@@ -489,6 +493,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         let optionRow = NSStackView(views: [
             NSTextField(labelWithString: "调音音源"),
             pitchStemControl,
+            NSTextField(labelWithString: "处理"),
+            pitchProcessingModeControl,
             NSTextField(labelWithString: "音调"),
             pitchDirectionControl,
             NSTextField(labelWithString: "半音"),
@@ -863,7 +869,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
     @objc private func pitchSemitoneFieldChanged() {
         syncPitchSemitoneControls()
-        refresh()
+        pitchOptionsChanged()
     }
 
     @objc private func startPitchShift() {
@@ -875,14 +881,16 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             pitchCancellation = cancellation
             isPitchShifting = true
             progressIndicator.doubleValue = 0
-            summaryLabel.stringValue = "正在调音：准备处理 \(request.sourceURL.lastPathComponent)"
+            let activeActionText = request.processingMode == .exportOnly ? "导出" : "调音"
+            summaryLabel.stringValue = "正在\(activeActionText)：准备处理 \(request.sourceURL.lastPathComponent)"
             setControlsForPitchShift(active: true)
 
             logger.log(.info, event: "pitch_shift.started", details: [
                 "source": request.sourceURL.path,
                 "output": request.outputURL.path,
                 "pitch": "\(request.pitchValue)",
-                "stem": request.stemSelection.rawValue
+                "stem": request.stemSelection.rawValue,
+                "processing_mode": request.processingMode.rawValue
             ])
             savePitchPreferences()
 
@@ -894,7 +902,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
                         progress: { [weak self] fraction in
                             Task { @MainActor in
                                 self?.progressIndicator.doubleValue = min(max(fraction, 0), 1)
-                                self?.summaryLabel.stringValue = "正在调音：\(Int(fraction * 100))% \(request.outputURL.lastPathComponent)"
+                                self?.summaryLabel.stringValue = "正在\(activeActionText)：\(Int(fraction * 100))% \(request.outputURL.lastPathComponent)"
                             }
                         }
                     )
@@ -903,18 +911,19 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
                         "source": request.sourceURL.path,
                         "output": request.outputURL.path,
                         "pitch": "\(request.pitchValue)",
-                        "stem": request.stemSelection.rawValue
+                        "stem": request.stemSelection.rawValue,
+                        "processing_mode": request.processingMode.rawValue
                     ])
                     pitchOutputURL = request.outputURL
                     pitchOutputField.stringValue = request.outputURL.path
                     progressIndicator.doubleValue = 1
-                    summaryLabel.stringValue = "调音完成：\(request.outputURL.path)"
+                    summaryLabel.stringValue = "\(activeActionText)完成：\(request.outputURL.path)"
                 } catch PitchShiftError.cancelled {
                     logger.log(.warning, event: "pitch_shift.cancelled", details: [
                         "source": request.sourceURL.path,
                         "output": request.outputURL.path
                     ])
-                    summaryLabel.stringValue = "已停止调音"
+                    summaryLabel.stringValue = "已停止\(activeActionText)"
                 } catch {
                     logger.log(.error, event: "pitch_shift.failed", details: [
                         "source": request.sourceURL.path,
@@ -1181,7 +1190,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             outputURL: output,
             direction: pitchDirection(),
             semitones: pitchSemitoneCount(),
-            stemSelection: pitchStemSelection()
+            stemSelection: pitchStemSelection(),
+            processingMode: pitchProcessingMode()
         )
     }
 
@@ -1200,12 +1210,32 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         pitchDirection() == .up ? "上升" : "下降"
     }
 
+    private func pitchProcessingMode() -> AudioProcessingMode {
+        pitchProcessingModeControl.selectedSegment == 0 ? .exportOnly : .pitchShift
+    }
+
+    private func pitchProcessingModeText() -> String {
+        pitchProcessingMode() == .exportOnly ? "只导出" : "调音"
+    }
+
     private func pitchStemSelection() -> AudioStemSelection {
         switch pitchStemControl.selectedSegment {
         case 1: return .vocals
         case 2: return .accompaniment
         default: return .original
         }
+    }
+
+    private func pitchStemText() -> String {
+        switch pitchStemSelection() {
+        case .original: return "原音"
+        case .vocals: return "人声"
+        case .accompaniment: return "背景音"
+        }
+    }
+
+    private func selectPitchProcessingMode(_ mode: AudioProcessingMode) {
+        pitchProcessingModeControl.selectedSegment = mode == .exportOnly ? 0 : 1
     }
 
     private func selectPitchDirection(_ direction: PitchShiftDirection) {
@@ -1234,11 +1264,17 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     }
 
     private func defaultPitchOutputURL(for input: URL) -> URL {
-        let suffix = pitchDirection() == .up ? "up" : "down"
         let baseName = input.deletingPathExtension().lastPathComponent
+        let outputName: String
+        if pitchProcessingMode() == .exportOnly {
+            outputName = "\(baseName)-\(pitchStemSelection().outputSuffix)"
+        } else {
+            let suffix = pitchDirection() == .up ? "up" : "down"
+            outputName = "\(baseName)-\(pitchStemSelection().outputSuffix)-pitch-\(suffix)-\(pitchSemitoneCount())"
+        }
         return input
             .deletingLastPathComponent()
-            .appendingPathComponent("\(baseName)-\(pitchStemSelection().outputSuffix)-pitch-\(suffix)-\(pitchSemitoneCount())")
+            .appendingPathComponent(outputName)
             .appendingPathExtension("mp3")
     }
 
@@ -1252,6 +1288,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         }
 
         selectPitchStem(preferences.stemSelection)
+        selectPitchProcessingMode(preferences.processingMode)
         selectPitchDirection(preferences.direction)
         pitchSemitoneField.integerValue = preferences.semitones
         syncPitchSemitoneControls()
@@ -1275,6 +1312,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             inputPath: pitchInputURL?.path,
             outputPath: pitchOutputURL?.path,
             stemSelection: pitchStemSelection(),
+            processingMode: pitchProcessingMode(),
             direction: pitchDirection(),
             semitones: pitchSemitoneCount(),
             outputManuallyChosen: isPitchOutputManuallyChosen
@@ -1314,12 +1352,15 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         choosePitchInputButton.isEnabled = !active
         choosePitchOutputButton.isEnabled = !active
         pitchStemControl.isEnabled = !active
-        pitchDirectionControl.isEnabled = !active
-        pitchSemitoneField.isEnabled = !active
-        pitchSemitoneStepper.isEnabled = !active
+        pitchProcessingModeControl.isEnabled = !active
+        pitchDirectionControl.isEnabled = !active && pitchProcessingMode() == .pitchShift
+        pitchSemitoneField.isEnabled = !active && pitchProcessingMode() == .pitchShift
+        pitchSemitoneStepper.isEnabled = !active && pitchProcessingMode() == .pitchShift
         startPitchButton.isEnabled = !active
         stopPitchButton.isEnabled = active
         revealPitchOutputButton.isEnabled = !active
+        startPitchButton.title = pitchProcessingMode() == .exportOnly ? "开始导出" : "开始调音"
+        stopPitchButton.title = pitchProcessingMode() == .exportOnly ? "停止导出" : "停止调音"
         updateProgressSeekability()
     }
 
@@ -1377,7 +1418,10 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
         let input = pitchInputURL?.lastPathComponent ?? "未选择"
         let output = pitchOutputURL?.lastPathComponent ?? "未设置"
-        summaryLabel.stringValue = "输入：\(input)，输出：\(output)，音调：\(pitchDirectionText()) \(pitchSemitoneCount()) 个半音"
+        let processingText = pitchProcessingMode() == .exportOnly
+            ? "处理：只导出 \(pitchStemText())"
+            : "处理：调音 \(pitchStemText())，音调：\(pitchDirectionText()) \(pitchSemitoneCount()) 个半音"
+        summaryLabel.stringValue = "输入：\(input)，输出：\(output)，\(processingText)"
         progressIndicator.doubleValue = 0
     }
 
@@ -2037,6 +2081,7 @@ private struct PitchShiftPreferences: Codable, Equatable {
     var inputPath: String?
     var outputPath: String?
     var stemSelection: AudioStemSelection
+    var processingMode: AudioProcessingMode
     var direction: PitchShiftDirection
     var semitones: Int
     var outputManuallyChosen: Bool
@@ -2045,6 +2090,7 @@ private struct PitchShiftPreferences: Codable, Equatable {
         inputPath: String? = nil,
         outputPath: String? = nil,
         stemSelection: AudioStemSelection = .original,
+        processingMode: AudioProcessingMode = .pitchShift,
         direction: PitchShiftDirection = .up,
         semitones: Int = 2,
         outputManuallyChosen: Bool = false
@@ -2052,9 +2098,31 @@ private struct PitchShiftPreferences: Codable, Equatable {
         self.inputPath = inputPath
         self.outputPath = outputPath
         self.stemSelection = stemSelection
+        self.processingMode = processingMode
         self.direction = direction
         self.semitones = max(1, min(24, semitones))
         self.outputManuallyChosen = outputManuallyChosen
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case inputPath
+        case outputPath
+        case stemSelection
+        case processingMode
+        case direction
+        case semitones
+        case outputManuallyChosen
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        inputPath = try container.decodeIfPresent(String.self, forKey: .inputPath)
+        outputPath = try container.decodeIfPresent(String.self, forKey: .outputPath)
+        stemSelection = try container.decodeIfPresent(AudioStemSelection.self, forKey: .stemSelection) ?? .original
+        processingMode = try container.decodeIfPresent(AudioProcessingMode.self, forKey: .processingMode) ?? .pitchShift
+        direction = try container.decodeIfPresent(PitchShiftDirection.self, forKey: .direction) ?? .up
+        semitones = max(1, min(24, try container.decodeIfPresent(Int.self, forKey: .semitones) ?? 2))
+        outputManuallyChosen = try container.decodeIfPresent(Bool.self, forKey: .outputManuallyChosen) ?? false
     }
 }
 
@@ -2078,6 +2146,7 @@ private struct PitchShiftPreferenceStore {
             inputPath: preferences.inputPath,
             outputPath: preferences.outputPath,
             stemSelection: preferences.stemSelection,
+            processingMode: preferences.processingMode,
             direction: preferences.direction,
             semitones: preferences.semitones,
             outputManuallyChosen: preferences.outputManuallyChosen

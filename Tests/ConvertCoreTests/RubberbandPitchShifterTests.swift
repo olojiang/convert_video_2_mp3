@@ -149,6 +149,76 @@ struct RubberbandPitchShifterTests {
             )
         }
     }
+
+    @Test func exportsSeparatedBackgroundWithoutRunningRubberband() async throws {
+        let root = try TemporaryDirectory()
+        let source = root.url.appendingPathComponent("song.mp3")
+        let output = root.url.appendingPathComponent("song-background.mp3")
+        try Data("mp3".utf8).write(to: source)
+
+        let runner = RecordingProcessRunner()
+        let shifter = RubberbandPitchShifter(
+            ffmpegURL: URL(fileURLWithPath: "/usr/bin/ffmpeg"),
+            rubberbandURL: URL(fileURLWithPath: "/usr/bin/rubberband"),
+            demucsURL: URL(fileURLWithPath: "/usr/bin/demucs"),
+            runner: runner
+        )
+
+        var progressValues: [Double] = []
+        try await shifter.shiftPitch(
+            request: PitchShiftRequest(
+                sourceURL: source,
+                outputURL: output,
+                direction: .up,
+                semitones: 6,
+                stemSelection: .accompaniment,
+                processingMode: .exportOnly
+            ),
+            cancellation: CancellationToken(),
+            progress: { progressValues.append($0) }
+        )
+
+        #expect(runner.commands.count == 2)
+        #expect(runner.commands[0].executableURL.path == "/usr/bin/demucs")
+        #expect(runner.commands[1].executableURL.path == "/usr/bin/ffmpeg")
+        #expect(runner.commands[1].arguments.contains { $0.hasSuffix("/no_vocals.wav") })
+        #expect(!runner.commands.contains { $0.executableURL.path == "/usr/bin/rubberband" })
+        #expect(FileManager.default.fileExists(atPath: output.path))
+        #expect(progressValues == [0.5, 1.0])
+    }
+
+    @Test func exportOnlyOriginalDoesNotRequireRubberband() async throws {
+        let root = try TemporaryDirectory()
+        let source = root.url.appendingPathComponent("song.mp3")
+        let output = root.url.appendingPathComponent("song-original.mp3")
+        try Data("mp3".utf8).write(to: source)
+
+        let runner = RecordingProcessRunner()
+        let shifter = RubberbandPitchShifter(
+            ffmpegURL: URL(fileURLWithPath: "/usr/bin/ffmpeg"),
+            rubberbandURL: nil,
+            demucsURL: nil,
+            runner: runner
+        )
+
+        var progressValues: [Double] = []
+        try await shifter.shiftPitch(
+            request: PitchShiftRequest(
+                sourceURL: source,
+                outputURL: output,
+                direction: .up,
+                semitones: 0,
+                processingMode: .exportOnly
+            ),
+            cancellation: CancellationToken(),
+            progress: { progressValues.append($0) }
+        )
+
+        #expect(runner.commands.count == 1)
+        #expect(runner.commands[0].executableURL.path == "/usr/bin/ffmpeg")
+        #expect(FileManager.default.fileExists(atPath: output.path))
+        #expect(progressValues == [1.0])
+    }
 }
 
 private final class RecordingProcessRunner: ProcessRunning {
