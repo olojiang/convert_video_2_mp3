@@ -2,6 +2,7 @@ import AppKit
 import AVFoundation
 import ConvertCore
 import Foundation
+import UniformTypeIdentifiers
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowController: MainWindowController?
@@ -133,6 +134,7 @@ final class SeekableProgressIndicator: NSProgressIndicator {
 private enum AppMode: String, Codable {
     case conversion
     case mp3Playback
+    case pitchShift
 }
 
 final class MainWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, AVAudioPlayerDelegate {
@@ -142,6 +144,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private let fileSizeReader = FileSizeReader()
     private let taskSorter = ConversionTaskSorter()
     private let mp3TrackSorter = MP3TrackSorter()
+    private let pitchShifter = RubberbandPitchShifter()
     private let historyStore = RootHistoryStore()
     private let sortPreferenceStore = TableSortPreferenceStore()
     private let mp3SortPreferenceStore = MP3SortPreferenceStore()
@@ -163,6 +166,10 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private var currentTrackID: String?
     private var playbackTimer: Timer?
     private var lastPeriodicPlaybackSave = Date.distantPast
+    private var pitchInputURL: URL?
+    private var pitchOutputURL: URL?
+    private var isPitchShifting = false
+    private var pitchCancellation: CancellationToken?
 
     private let rootLabel = NSTextField(labelWithString: "未选择目录")
     private let summaryLabel = NSTextField(labelWithString: "请选择一个根目录开始扫描")
@@ -171,7 +178,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private let scrollView = NSScrollView()
     private let chooseButton = NSButton(title: "选择目录", target: nil, action: nil)
     private let rescanButton = NSButton(title: "重新扫描", target: nil, action: nil)
-    private let modeControl = NSSegmentedControl(labels: ["转换模式", "MP3 播放"], trackingMode: .selectOne, target: nil, action: nil)
+    private let modeControl = NSSegmentedControl(labels: ["转换模式", "MP3 播放", "音乐调音"], trackingMode: .selectOne, target: nil, action: nil)
     private let selectAllButton = NSButton(title: "全选", target: nil, action: nil)
     private let selectNoneButton = NSButton(title: "清空选择", target: nil, action: nil)
     private let startButton = NSButton(title: "开始转 MP3", target: nil, action: nil)
@@ -189,6 +196,17 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private let forward30Button = NSButton(title: "+30s", target: nil, action: nil)
     private let nextTrackButton = NSButton(title: "下一首", target: nil, action: nil)
     private let progressIndicator = SeekableProgressIndicator()
+    private let pitchPanel = NSStackView()
+    private let pitchInputField = NSTextField()
+    private let pitchOutputField = NSTextField()
+    private let choosePitchInputButton = NSButton(title: "选择 MP3", target: nil, action: nil)
+    private let choosePitchOutputButton = NSButton(title: "输出为", target: nil, action: nil)
+    private let pitchDirectionControl = NSSegmentedControl(labels: ["上升", "下降"], trackingMode: .selectOne, target: nil, action: nil)
+    private let pitchSemitoneStepper = NSStepper()
+    private let pitchSemitoneField = NSTextField()
+    private let startPitchButton = NSButton(title: "开始调音", target: nil, action: nil)
+    private let stopPitchButton = NSButton(title: "停止调音", target: nil, action: nil)
+    private let revealPitchOutputButton = NSButton(title: "显示输出", target: nil, action: nil)
 
     init() {
         logger = Self.makeLogger()
@@ -262,8 +280,9 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
         concurrencyPopup.addItems(withTitles: ["并发 4", "并发 6", "并发 8"])
         concurrencyPopup.selectItem(withTitle: "并发 4")
-        modeControl.selectedSegment = appMode == .mp3Playback ? 1 : 0
+        modeControl.selectedSegment = selectedSegment(for: appMode)
         stopButton.isEnabled = false
+        stopPitchButton.isEnabled = false
 
         rootLabel.lineBreakMode = .byTruncatingMiddle
         summaryLabel.textColor = .secondaryLabelColor
@@ -275,6 +294,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         progressIndicator.onSeekRatio = { [weak self] ratio in
             self?.seekMP3(toProgress: ratio)
         }
+        configurePitchPanel()
 
         tableView.dataSource = self
         tableView.delegate = self
@@ -337,7 +357,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         labels.alignment = .leading
         labels.distribution = .fill
 
-        let main = NSStackView(views: [toolbar, labels, scrollView])
+        let main = NSStackView(views: [toolbar, labels, pitchPanel, scrollView])
         main.orientation = .vertical
         main.spacing = 12
         main.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
@@ -385,12 +405,98 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         forward30Button.action = #selector(forward30Seconds)
         nextTrackButton.target = self
         nextTrackButton.action = #selector(playNextTrack)
+        choosePitchInputButton.target = self
+        choosePitchInputButton.action = #selector(choosePitchInput)
+        choosePitchOutputButton.target = self
+        choosePitchOutputButton.action = #selector(choosePitchOutput)
+        pitchDirectionControl.target = self
+        pitchDirectionControl.action = #selector(pitchOptionsChanged)
+        pitchSemitoneStepper.target = self
+        pitchSemitoneStepper.action = #selector(pitchStepperChanged)
+        pitchSemitoneField.target = self
+        pitchSemitoneField.action = #selector(pitchSemitoneFieldChanged)
+        startPitchButton.target = self
+        startPitchButton.action = #selector(startPitchShift)
+        stopPitchButton.target = self
+        stopPitchButton.action = #selector(stopPitchShift)
+        revealPitchOutputButton.target = self
+        revealPitchOutputButton.action = #selector(revealPitchOutput)
         deleteSourceCheckbox.target = self
         deleteSourceCheckbox.action = #selector(deleteSourceOptionChanged)
         configureShortcutHelpButton()
         configureControlsForMode()
 
         logLabel.stringValue = "日志文件：\(logger.logURL.path)"
+    }
+
+    private func selectedSegment(for mode: AppMode) -> Int {
+        switch mode {
+        case .conversion: return 0
+        case .mp3Playback: return 1
+        case .pitchShift: return 2
+        }
+    }
+
+    private func configurePitchPanel() {
+        pitchPanel.orientation = .vertical
+        pitchPanel.spacing = 10
+        pitchPanel.alignment = .leading
+        pitchPanel.edgeInsets = NSEdgeInsets(top: 8, left: 0, bottom: 8, right: 0)
+
+        pitchInputField.placeholderString = "/path/to/input.mp3"
+        pitchOutputField.placeholderString = "/path/to/output.mp3"
+        pitchInputField.lineBreakMode = .byTruncatingMiddle
+        pitchOutputField.lineBreakMode = .byTruncatingMiddle
+        pitchDirectionControl.selectedSegment = 0
+
+        pitchSemitoneStepper.minValue = 1
+        pitchSemitoneStepper.maxValue = 24
+        pitchSemitoneStepper.increment = 1
+        pitchSemitoneStepper.integerValue = 2
+        pitchSemitoneField.integerValue = 2
+        pitchSemitoneField.alignment = .center
+
+        let inputRow = NSStackView(views: [
+            NSTextField(labelWithString: "输入 MP3"),
+            pitchInputField,
+            choosePitchInputButton
+        ])
+        inputRow.orientation = .horizontal
+        inputRow.spacing = 8
+        inputRow.alignment = .centerY
+
+        let outputRow = NSStackView(views: [
+            NSTextField(labelWithString: "输出 MP3"),
+            pitchOutputField,
+            choosePitchOutputButton,
+            revealPitchOutputButton
+        ])
+        outputRow.orientation = .horizontal
+        outputRow.spacing = 8
+        outputRow.alignment = .centerY
+
+        let optionRow = NSStackView(views: [
+            NSTextField(labelWithString: "音调"),
+            pitchDirectionControl,
+            NSTextField(labelWithString: "半音"),
+            pitchSemitoneField,
+            pitchSemitoneStepper,
+            startPitchButton,
+            stopPitchButton
+        ])
+        optionRow.orientation = .horizontal
+        optionRow.spacing = 8
+        optionRow.alignment = .centerY
+
+        pitchPanel.addArrangedSubview(inputRow)
+        pitchPanel.addArrangedSubview(outputRow)
+        pitchPanel.addArrangedSubview(optionRow)
+
+        NSLayoutConstraint.activate([
+            pitchInputField.widthAnchor.constraint(greaterThanOrEqualToConstant: 620),
+            pitchOutputField.widthAnchor.constraint(greaterThanOrEqualToConstant: 620),
+            pitchSemitoneField.widthAnchor.constraint(equalToConstant: 48)
+        ])
     }
 
     private func addColumn(id: String, title: String, width: CGFloat) {
@@ -472,11 +578,19 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             tableColumn(id: "mp3Size")?.isHidden = true
             tableColumn(id: "output")?.title = "路径"
             tableColumn(id: "output")?.width = 430
+        case .pitchShift:
+            break
         }
     }
 
     private func configureControlsForMode() {
         let conversionMode = appMode == .conversion
+        let playbackMode = appMode == .mp3Playback
+        let pitchMode = appMode == .pitchShift
+        chooseButton.isHidden = pitchMode
+        rescanButton.isHidden = pitchMode
+        scrollView.isHidden = pitchMode
+        pitchPanel.isHidden = !pitchMode
         selectAllButton.isHidden = !conversionMode
         selectNoneButton.isHidden = !conversionMode
         concurrencyPopup.isHidden = !conversionMode
@@ -485,17 +599,17 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         stopButton.isHidden = !conversionMode
         cleanPartFoldersButton.isHidden = !conversionMode
 
-        previousTrackButton.isHidden = conversionMode
-        rewind30Button.isHidden = conversionMode
-        rewind5Button.isHidden = conversionMode
-        playPauseButton.isHidden = conversionMode
-        forward5Button.isHidden = conversionMode
-        forward30Button.isHidden = conversionMode
-        nextTrackButton.isHidden = conversionMode
+        previousTrackButton.isHidden = !playbackMode
+        rewind30Button.isHidden = !playbackMode
+        rewind5Button.isHidden = !playbackMode
+        playPauseButton.isHidden = !playbackMode
+        forward5Button.isHidden = !playbackMode
+        forward30Button.isHidden = !playbackMode
+        nextTrackButton.isHidden = !playbackMode
 
         if conversionMode {
             setControlsForConversion(active: isConverting)
-        } else {
+        } else if playbackMode {
             chooseButton.isEnabled = true
             rescanButton.isEnabled = rootURL != nil
             modeControl.isEnabled = true
@@ -507,6 +621,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             forward5Button.isEnabled = hasTracks
             forward30Button.isEnabled = hasTracks
             nextTrackButton.isEnabled = hasTracks
+        } else {
+            setControlsForPitchShift(active: isPitchShifting)
         }
         updateProgressSeekability()
     }
@@ -561,11 +677,21 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
     @objc private func modeChanged() {
         saveCurrentPlaybackPosition()
-        appMode = modeControl.selectedSegment == 1 ? .mp3Playback : .conversion
+        switch modeControl.selectedSegment {
+        case 1:
+            appMode = .mp3Playback
+        case 2:
+            appMode = .pitchShift
+        default:
+            appMode = .conversion
+        }
         viewPreferenceStore.save(appMode)
         if appMode == .conversion {
             stopMP3Playback()
+        } else if appMode == .mp3Playback {
+            coordinator?.requestStop()
         } else {
+            stopMP3Playback()
             coordinator?.requestStop()
         }
         configureColumnsForMode()
@@ -657,6 +783,141 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         coordinator?.requestStop()
         stopButton.isEnabled = false
         summaryLabel.stringValue = "正在停止：等待当前 ffmpeg 进程结束或被终止"
+    }
+
+    @objc private func choosePitchInput() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        if let mp3Type = UTType(filenameExtension: "mp3") {
+            panel.allowedContentTypes = [mp3Type]
+        }
+        panel.prompt = "选择"
+        if panel.runModal() == .OK, let url = panel.url {
+            pitchInputURL = url
+            pitchInputField.stringValue = url.path
+            let output = defaultPitchOutputURL(for: url)
+            pitchOutputURL = output
+            pitchOutputField.stringValue = output.path
+            refresh()
+        }
+    }
+
+    @objc private func choosePitchOutput() {
+        let panel = NSSavePanel()
+        if let mp3Type = UTType(filenameExtension: "mp3") {
+            panel.allowedContentTypes = [mp3Type]
+        }
+        panel.nameFieldStringValue = pitchOutputURL?.lastPathComponent
+            ?? pitchInputURL.map { defaultPitchOutputURL(for: $0).lastPathComponent }
+            ?? "output.mp3"
+        panel.prompt = "保存"
+        if panel.runModal() == .OK, let url = panel.url {
+            pitchOutputURL = url
+            pitchOutputField.stringValue = url.path
+            refresh()
+        }
+    }
+
+    @objc private func pitchOptionsChanged() {
+        syncPitchSemitoneControls()
+        if let input = pitchInputURL, pitchOutputField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let output = defaultPitchOutputURL(for: input)
+            pitchOutputURL = output
+            pitchOutputField.stringValue = output.path
+        }
+        refresh()
+    }
+
+    @objc private func pitchStepperChanged() {
+        pitchSemitoneField.integerValue = pitchSemitoneStepper.integerValue
+        pitchOptionsChanged()
+    }
+
+    @objc private func pitchSemitoneFieldChanged() {
+        syncPitchSemitoneControls()
+        refresh()
+    }
+
+    @objc private func startPitchShift() {
+        guard !isPitchShifting else { return }
+
+        do {
+            let request = try makePitchShiftRequest()
+            let cancellation = CancellationToken()
+            pitchCancellation = cancellation
+            isPitchShifting = true
+            progressIndicator.doubleValue = 0
+            summaryLabel.stringValue = "正在调音：准备处理 \(request.sourceURL.lastPathComponent)"
+            setControlsForPitchShift(active: true)
+
+            logger.log(.info, event: "pitch_shift.started", details: [
+                "source": request.sourceURL.path,
+                "output": request.outputURL.path,
+                "pitch": "\(request.pitchValue)"
+            ])
+
+            Task { @MainActor in
+                do {
+                    try await pitchShifter.shiftPitch(
+                        request: request,
+                        cancellation: cancellation,
+                        progress: { [weak self] fraction in
+                            Task { @MainActor in
+                                self?.progressIndicator.doubleValue = min(max(fraction, 0), 1)
+                                self?.summaryLabel.stringValue = "正在调音：\(Int(fraction * 100))% \(request.outputURL.lastPathComponent)"
+                            }
+                        }
+                    )
+
+                    logger.log(.info, event: "pitch_shift.succeeded", details: [
+                        "source": request.sourceURL.path,
+                        "output": request.outputURL.path,
+                        "pitch": "\(request.pitchValue)"
+                    ])
+                    pitchOutputURL = request.outputURL
+                    pitchOutputField.stringValue = request.outputURL.path
+                    progressIndicator.doubleValue = 1
+                    summaryLabel.stringValue = "调音完成：\(request.outputURL.path)"
+                } catch PitchShiftError.cancelled {
+                    logger.log(.warning, event: "pitch_shift.cancelled", details: [
+                        "source": request.sourceURL.path,
+                        "output": request.outputURL.path
+                    ])
+                    summaryLabel.stringValue = "已停止调音"
+                } catch {
+                    logger.log(.error, event: "pitch_shift.failed", details: [
+                        "source": request.sourceURL.path,
+                        "output": request.outputURL.path,
+                        "error": error.localizedDescription
+                    ])
+                    showError(error)
+                }
+
+                isPitchShifting = false
+                pitchCancellation = nil
+                setControlsForPitchShift(active: false)
+            }
+        } catch {
+            showError(error)
+        }
+    }
+
+    @objc private func stopPitchShift() {
+        pitchCancellation?.requestCancel()
+        stopPitchButton.isEnabled = false
+        summaryLabel.stringValue = "正在停止：等待当前调音命令结束或被终止"
+    }
+
+    @objc private func revealPitchOutput() {
+        updatePitchURLsFromFields()
+        guard let pitchOutputURL,
+              FileManager.default.fileExists(atPath: pitchOutputURL.path) else {
+            showMessage(title: "输出文件不存在", text: "请先完成调音，或检查输出路径。")
+            return
+        }
+        NSWorkspace.shared.activateFileViewerSelecting([pitchOutputURL])
     }
 
     @objc private func revealLogs() {
@@ -876,6 +1137,57 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         }
     }
 
+    private func makePitchShiftRequest() throws -> PitchShiftRequest {
+        updatePitchURLsFromFields()
+        guard let pitchInputURL else {
+            throw PitchShiftError.invalidSource
+        }
+        let output = pitchOutputURL ?? defaultPitchOutputURL(for: pitchInputURL)
+        pitchOutputURL = output
+        pitchOutputField.stringValue = output.path
+
+        return PitchShiftRequest(
+            sourceURL: pitchInputURL,
+            outputURL: output,
+            direction: pitchDirection(),
+            semitones: pitchSemitoneCount()
+        )
+    }
+
+    private func updatePitchURLsFromFields() {
+        let input = pitchInputField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let output = pitchOutputField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        pitchInputURL = input.isEmpty ? nil : URL(fileURLWithPath: (input as NSString).expandingTildeInPath)
+        pitchOutputURL = output.isEmpty ? nil : URL(fileURLWithPath: (output as NSString).expandingTildeInPath)
+    }
+
+    private func pitchDirection() -> PitchShiftDirection {
+        pitchDirectionControl.selectedSegment == 1 ? .down : .up
+    }
+
+    private func pitchDirectionText() -> String {
+        pitchDirection() == .up ? "上升" : "下降"
+    }
+
+    private func pitchSemitoneCount() -> Int {
+        max(1, min(24, pitchSemitoneField.integerValue))
+    }
+
+    private func syncPitchSemitoneControls() {
+        let value = pitchSemitoneCount()
+        pitchSemitoneField.integerValue = value
+        pitchSemitoneStepper.integerValue = value
+    }
+
+    private func defaultPitchOutputURL(for input: URL) -> URL {
+        let suffix = pitchDirection() == .up ? "up" : "down"
+        let baseName = input.deletingPathExtension().lastPathComponent
+        return input
+            .deletingLastPathComponent()
+            .appendingPathComponent("\(baseName)-pitch-\(suffix)-\(pitchSemitoneCount())")
+            .appendingPathExtension("mp3")
+    }
+
     private func selectedConversionTasks() -> [ConversionTask] {
         tasks.filter { selectedIDs.contains($0.id) && canSelectForConversion($0) }
     }
@@ -902,13 +1214,32 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         updateProgressSeekability()
     }
 
+    private func setControlsForPitchShift(active: Bool) {
+        modeControl.isEnabled = !active
+        pitchInputField.isEnabled = !active
+        pitchOutputField.isEnabled = !active
+        choosePitchInputButton.isEnabled = !active
+        choosePitchOutputButton.isEnabled = !active
+        pitchDirectionControl.isEnabled = !active
+        pitchSemitoneField.isEnabled = !active
+        pitchSemitoneStepper.isEnabled = !active
+        startPitchButton.isEnabled = !active
+        stopPitchButton.isEnabled = active
+        revealPitchOutputButton.isEnabled = !active
+        updateProgressSeekability()
+    }
+
     private func refresh(reloadTable: Bool = true) {
         if reloadTable {
             tableView.reloadData()
         }
         configureControlsForMode()
-        guard appMode == .conversion else {
+        if appMode == .mp3Playback {
             refreshMP3Summary()
+            return
+        }
+        if appMode == .pitchShift {
+            refreshPitchSummary()
             return
         }
 
@@ -943,6 +1274,17 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
 
         summaryLabel.stringValue = "共 \(mp3Tracks.count) 个 MP3，大小 \(FileSizeText.format(totalBytes))\(currentText)"
         progressIndicator.doubleValue = mp3PlaybackProgress()
+    }
+
+    private func refreshPitchSummary() {
+        if isPitchShifting {
+            return
+        }
+
+        let input = pitchInputURL?.lastPathComponent ?? "未选择"
+        let output = pitchOutputURL?.lastPathComponent ?? "未设置"
+        summaryLabel.stringValue = "输入：\(input)，输出：\(output)，音调：\(pitchDirectionText()) \(pitchSemitoneCount()) 个半音"
+        progressIndicator.doubleValue = 0
     }
 
     private func mp3PlaybackProgress() -> Double {
@@ -1281,6 +1623,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         switch appMode {
         case .conversion: return tasks.count
         case .mp3Playback: return mp3Tracks.count
+        case .pitchShift: return 0
         }
     }
 
@@ -1348,6 +1691,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             mp3SortPreference = MP3TrackSortOption(column: column, direction: direction)
             mp3SortPreferenceStore.save(mp3SortPreference)
             applyMP3Sort()
+        case .pitchShift:
+            return
         }
         refresh()
     }
