@@ -9,12 +9,17 @@ let package = Package(
     ],
     products: [
         .library(name: "ConvertCore", targets: ["ConvertCore"]),
-        .executable(name: "ConvertVideo2MP3", targets: ["ConvertVideo2MP3App"])
+        .executable(name: "ConvertVideo2MP3", targets: ["ConvertVideo2MP3App"]),
+        .executable(name: "ConvertVideo2MP3CLI", targets: ["ConvertVideo2MP3CLI"])
     ],
     targets: [
         .target(name: "ConvertCore"),
         .executableTarget(
             name: "ConvertVideo2MP3App",
+            dependencies: ["ConvertCore"]
+        ),
+        .executableTarget(
+            name: "ConvertVideo2MP3CLI",
             dependencies: ["ConvertCore"]
         ),
         .testTarget(

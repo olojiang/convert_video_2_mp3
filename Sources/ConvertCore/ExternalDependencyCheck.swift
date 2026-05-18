@@ -31,11 +31,23 @@ public enum ExternalDependency: String, CaseIterable, Equatable, Hashable {
     public var installHint: String {
         switch self {
         case .ffmpeg, .ffprobe:
+            #if os(Windows)
+            return "winget install Gyan.FFmpeg"
+            #else
             return "brew install ffmpeg"
+            #endif
         case .rubberband:
+            #if os(Windows)
+            return "Install Rubber Band CLI and add rubberband.exe to PATH"
+            #else
             return "brew install rubberband"
+            #endif
         case .demucs:
+            #if os(Windows)
+            return "py -m pip install --user -U demucs"
+            #else
             return "pipx install demucs"
+            #endif
         }
     }
 }

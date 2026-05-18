@@ -394,9 +394,7 @@ public enum RubberbandLocator {
             "/usr/local/bin/rubberband",
             "/usr/bin/rubberband"
         ]
-        return candidates
-            .map(URL.init(fileURLWithPath:))
-            .first { FileManager.default.isExecutableFile(atPath: $0.path) }
+        return ExecutableLocator.find(named: "rubberband", fixedCandidates: candidates)
     }
 }
 
@@ -408,15 +406,19 @@ public enum DemucsLocator {
             "/usr/bin/demucs",
             "\(NSHomeDirectory())/.local/bin/demucs"
         ] + pythonUserBaseCandidates()
-        return candidates
-            .map(URL.init(fileURLWithPath:))
-            .first { FileManager.default.isExecutableFile(atPath: $0.path) }
+        return ExecutableLocator.find(named: "demucs", fixedCandidates: candidates)
     }
 
     private static func pythonUserBaseCandidates() -> [String] {
+        guard let pythonURL = ExecutableLocator.find(named: "python3")
+            ?? ExecutableLocator.find(named: "python")
+            ?? ExecutableLocator.find(named: "py") else {
+            return []
+        }
+
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["python3", "-m", "site", "--user-base"]
+        process.executableURL = pythonURL
+        process.arguments = ["-m", "site", "--user-base"]
 
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -432,7 +434,15 @@ public enum DemucsLocator {
                   !base.isEmpty else {
                 return []
             }
+            #if os(Windows)
+            return [
+                "\(base)/Scripts/demucs.exe",
+                "\(base)/Scripts/demucs.cmd",
+                "\(base)/bin/demucs"
+            ]
+            #else
             return ["\(base)/bin/demucs"]
+            #endif
         } catch {
             return []
         }

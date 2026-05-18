@@ -183,9 +183,7 @@ public enum FFmpegLocator {
             "/usr/local/bin/ffmpeg",
             "/usr/bin/ffmpeg"
         ]
-        return candidates
-            .map(URL.init(fileURLWithPath:))
-            .first { FileManager.default.isExecutableFile(atPath: $0.path) }
+        return ExecutableLocator.find(named: "ffmpeg", fixedCandidates: candidates)
     }
 
     public static func findFFprobe() -> URL? {
@@ -194,8 +192,6 @@ public enum FFmpegLocator {
             "/usr/local/bin/ffprobe",
             "/usr/bin/ffprobe"
         ]
-        return candidates
-            .map(URL.init(fileURLWithPath:))
-            .first { FileManager.default.isExecutableFile(atPath: $0.path) }
+        return ExecutableLocator.find(named: "ffprobe", fixedCandidates: candidates)
     }
 }

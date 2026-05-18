@@ -1,0 +1,43 @@
+name: Windows x64 CLI
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/windows-x64.yml"
+      - "Package.swift"
+      - "Sources/ConvertCore/**"
+      - "Sources/ConvertVideo2MP3CLI/**"
+      - "Tests/ConvertCoreTests/**"
+      - "scripts/build_windows_x64.ps1"
+
+jobs:
+  build:
+    name: Build Windows x64 CLI
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Swift toolchain
+        shell: pwsh
+        run: |
+          winget install --id Swift.Toolchain -e --source winget --accept-package-agreements --accept-source-agreements
+          $swiftBin = "$env:LOCALAPPDATA\Programs\Swift\Toolchains\*\usr\bin"
+          $resolved = Resolve-Path $swiftBin | Select-Object -First 1
+          if ($null -ne $resolved) {
+            "$resolved" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+
+      - name: Build package
+        shell: pwsh
+        run: ./scripts/build_windows_x64.ps1
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ConvertVideo2MP3-windows-x64
+          path: dist/ConvertVideo2MP3-windows-x64.zip
