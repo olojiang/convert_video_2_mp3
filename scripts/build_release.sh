@@ -65,9 +65,15 @@ PLIST
 codesign --force --deep --sign - "${APP_DIR}"
 ditto -c -k --sequesterRsrc --keepParent "${APP_DIR}" "${ZIP_PATH}"
 
-rm -rf "/Applications/${APP_BUNDLE}" "/Applications/${LEGACY_APP_BUNDLE}"
-cp -R "${APP_DIR}" "/Applications/${APP_BUNDLE}"
+if [[ "${INSTALL_APP:-1}" == "1" ]]; then
+  rm -rf "/Applications/${APP_BUNDLE}" "/Applications/${LEGACY_APP_BUNDLE}"
+  cp -R "${APP_DIR}" "/Applications/${APP_BUNDLE}"
+fi
 
 echo "Built: ${APP_DIR}"
 echo "Package: ${ZIP_PATH}"
-echo "Installed: /Applications/${APP_BUNDLE}"
+if [[ "${INSTALL_APP:-1}" == "1" ]]; then
+  echo "Installed: /Applications/${APP_BUNDLE}"
+else
+  echo "Install skipped: INSTALL_APP=${INSTALL_APP}"
+fi
