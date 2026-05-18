@@ -196,6 +196,50 @@ struct RubberbandPitchShifterTests {
         #expect(progressValues == [0.5, 1.0])
     }
 
+    @Test func separatesBackgroundWithDemucsBeforePitchShiftingSelectedStem() async throws {
+        let root = try TemporaryDirectory()
+        let source = root.url.appendingPathComponent("song.mp3")
+        let output = root.url.appendingPathComponent("song-background-pitch-up-6.mp3")
+        try Data("mp3".utf8).write(to: source)
+
+        let runner = RecordingProcessRunner()
+        let shifter = RubberbandPitchShifter(
+            ffmpegURL: URL(fileURLWithPath: "/usr/bin/ffmpeg"),
+            rubberbandURL: URL(fileURLWithPath: "/usr/bin/rubberband"),
+            demucsURL: URL(fileURLWithPath: "/usr/bin/demucs"),
+            runner: runner
+        )
+
+        var progressValues: [Double] = []
+        var logLines: [String] = []
+        try await shifter.shiftPitch(
+            request: PitchShiftRequest(
+                sourceURL: source,
+                outputURL: output,
+                direction: .up,
+                semitones: 6,
+                stemSelection: .accompaniment,
+                processingMode: .pitchShift
+            ),
+            cancellation: CancellationToken(),
+            progress: { progressValues.append($0) },
+            log: { logLines.append($0) }
+        )
+
+        #expect(runner.commands.count == 4)
+        #expect(runner.commands[0].executableURL.path == "/usr/bin/demucs")
+        #expect(argumentValue(after: "--shifts", in: runner.commands[0].arguments) == "4")
+        #expect(runner.commands[1].executableURL.path == "/usr/bin/ffmpeg")
+        #expect(runner.commands[1].arguments.contains { $0.hasSuffix("/no_vocals.wav") })
+        #expect(runner.commands[2].executableURL.path == "/usr/bin/rubberband")
+        #expect(Array(runner.commands[2].arguments[0...1]) == ["-p", "6"])
+        #expect(runner.commands[3].executableURL.path == "/usr/bin/ffmpeg")
+        #expect(FileManager.default.fileExists(atPath: output.path))
+        #expect(progressValues == [0.25, 0.5, 0.75, 1.0])
+        #expect(logLines.contains { $0.contains("调音音源：背景音") })
+        #expect(logLines.contains { $0.contains("no_vocals.wav") })
+    }
+
     @Test func exportOnlyOriginalDoesNotRequireRubberband() async throws {
         let root = try TemporaryDirectory()
         let source = root.url.appendingPathComponent("song.mp3")

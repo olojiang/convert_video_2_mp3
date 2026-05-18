@@ -211,6 +211,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
     private let startPitchButton = NSButton(title: "开始调音", target: nil, action: nil)
     private let stopPitchButton = NSButton(title: "停止调音", target: nil, action: nil)
     private let revealPitchOutputButton = NSButton(title: "显示输出", target: nil, action: nil)
+    private let pitchLogScrollView = NSScrollView()
+    private let pitchLogTextView = NSTextView()
 
     init() {
         logger = Self.makeLogger()
@@ -470,6 +472,17 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         pitchSemitoneStepper.integerValue = 2
         pitchSemitoneField.integerValue = 2
         pitchSemitoneField.alignment = .center
+        pitchLogTextView.isEditable = false
+        pitchLogTextView.isSelectable = true
+        pitchLogTextView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        pitchLogTextView.textColor = .labelColor
+        pitchLogTextView.backgroundColor = .textBackgroundColor
+        pitchLogTextView.textContainerInset = NSSize(width: 8, height: 8)
+        pitchLogTextView.string = "调音日志会显示在这里，可选中复制。"
+        pitchLogScrollView.documentView = pitchLogTextView
+        pitchLogScrollView.hasVerticalScroller = true
+        pitchLogScrollView.hasHorizontalScroller = true
+        pitchLogScrollView.borderType = .bezelBorder
 
         let inputRow = NSStackView(views: [
             NSTextField(labelWithString: "输入 MP3"),
@@ -510,11 +523,14 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         pitchPanel.addArrangedSubview(inputRow)
         pitchPanel.addArrangedSubview(outputRow)
         pitchPanel.addArrangedSubview(optionRow)
+        pitchPanel.addArrangedSubview(pitchLogScrollView)
 
         NSLayoutConstraint.activate([
             pitchInputField.widthAnchor.constraint(greaterThanOrEqualToConstant: 620),
             pitchOutputField.widthAnchor.constraint(greaterThanOrEqualToConstant: 620),
-            pitchSemitoneField.widthAnchor.constraint(equalToConstant: 48)
+            pitchSemitoneField.widthAnchor.constraint(equalToConstant: 48),
+            pitchLogScrollView.widthAnchor.constraint(greaterThanOrEqualToConstant: 900),
+            pitchLogScrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 260)
         ])
     }
 
@@ -883,6 +899,8 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             progressIndicator.doubleValue = 0
             let activeActionText = request.processingMode == .exportOnly ? "导出" : "调音"
             summaryLabel.stringValue = "正在\(activeActionText)：准备处理 \(request.sourceURL.lastPathComponent)"
+            resetPitchLog()
+            appendPitchLog("开始\(activeActionText)：\(request.sourceURL.lastPathComponent)")
             setControlsForPitchShift(active: true)
 
             logger.log(.info, event: "pitch_shift.started", details: [
@@ -904,6 +922,11 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
                                 self?.progressIndicator.doubleValue = min(max(fraction, 0), 1)
                                 self?.summaryLabel.stringValue = "正在\(activeActionText)：\(Int(fraction * 100))% \(request.outputURL.lastPathComponent)"
                             }
+                        },
+                        log: { [weak self] message in
+                            Task { @MainActor in
+                                self?.appendPitchLog(message)
+                            }
                         }
                     )
 
@@ -918,18 +941,21 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
                     pitchOutputField.stringValue = request.outputURL.path
                     progressIndicator.doubleValue = 1
                     summaryLabel.stringValue = "\(activeActionText)完成：\(request.outputURL.path)"
+                    appendPitchLog("\(activeActionText)完成。")
                 } catch PitchShiftError.cancelled {
                     logger.log(.warning, event: "pitch_shift.cancelled", details: [
                         "source": request.sourceURL.path,
                         "output": request.outputURL.path
                     ])
                     summaryLabel.stringValue = "已停止\(activeActionText)"
+                    appendPitchLog("已停止\(activeActionText)。")
                 } catch {
                     logger.log(.error, event: "pitch_shift.failed", details: [
                         "source": request.sourceURL.path,
                         "output": request.outputURL.path,
                         "error": error.localizedDescription
                     ])
+                    appendPitchLog("\(activeActionText)失败：\(error.localizedDescription)")
                     showError(error)
                 }
 
@@ -947,6 +973,7 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
         pitchCancellation?.requestCancel()
         stopPitchButton.isEnabled = false
         summaryLabel.stringValue = "正在停止：等待当前调音命令结束或被终止"
+        appendPitchLog("收到停止请求，等待当前命令结束或被终止。")
     }
 
     @objc private func revealPitchOutput() {
@@ -1423,6 +1450,18 @@ final class MainWindowController: NSWindowController, NSTableViewDataSource, NST
             : "处理：调音 \(pitchStemText())，音调：\(pitchDirectionText()) \(pitchSemitoneCount()) 个半音"
         summaryLabel.stringValue = "输入：\(input)，输出：\(output)，\(processingText)"
         progressIndicator.doubleValue = 0
+    }
+
+    private func resetPitchLog() {
+        pitchLogTextView.string = ""
+    }
+
+    private func appendPitchLog(_ message: String) {
+        let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+        let line = "[\(timestamp)] \(message)\n"
+        let attributedLine = NSAttributedString(string: line)
+        pitchLogTextView.textStorage?.append(attributedLine)
+        pitchLogTextView.scrollRangeToVisible(NSRange(location: pitchLogTextView.string.count, length: 0))
     }
 
     private func mp3PlaybackProgress() -> Double {

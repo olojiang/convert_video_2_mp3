@@ -44,6 +44,13 @@ public struct PitchShiftRequest: Equatable {
 public enum AudioProcessingMode: String, Codable, Equatable, CaseIterable {
     case exportOnly
     case pitchShift
+
+    fileprivate var displayName: String {
+        switch self {
+        case .exportOnly: return "只导出"
+        case .pitchShift: return "调音"
+        }
+    }
 }
 
 public enum AudioStemSelection: String, Codable, Equatable, CaseIterable {
@@ -56,6 +63,14 @@ public enum AudioStemSelection: String, Codable, Equatable, CaseIterable {
         case .original: return "original"
         case .vocals: return "vocals"
         case .accompaniment: return "background"
+        }
+    }
+
+    fileprivate var displayName: String {
+        switch self {
+        case .original: return "原音"
+        case .vocals: return "人声"
+        case .accompaniment: return "背景音"
         }
     }
 
@@ -132,7 +147,8 @@ public final class RubberbandPitchShifter {
     public func shiftPitch(
         request: PitchShiftRequest,
         cancellation: CancellationChecking,
-        progress: @escaping (Double) -> Void
+        progress: @escaping (Double) -> Void,
+        log: @escaping (String) -> Void = { _ in }
     ) async throws {
         guard FileManager.default.fileExists(atPath: request.sourceURL.path),
               request.sourceURL.pathExtension.lowercased() == "mp3" else {
@@ -187,25 +203,39 @@ public final class RubberbandPitchShifter {
             totalSteps = 4
         }
         var completedSteps = 0.0
+        let stepCount = Int(totalSteps)
+
+        log("输入 MP3：\(request.sourceURL.path)")
+        log("输出 MP3：\(request.outputURL.path)")
+        log("调音音源：\(request.stemSelection.displayName)")
+        log("处理方式：\(request.processingMode.displayName)")
+        if request.processingMode == .pitchShift {
+            log("音调：\(request.direction == .up ? "上升" : "下降") \(request.semitones) 个半音（Rubber Band 参数 \(request.pitchValue)）")
+        }
 
         if request.stemSelection == .original {
             pitchSourceURL = request.sourceURL
+            log("使用原始 MP3 作为处理输入。")
         } else {
             guard let demucsURL else {
                 throw PitchShiftError.demucsNotFound
             }
+            log("步骤 1/\(stepCount)：用 Demucs 分离\(request.stemSelection.displayName)。")
             pitchSourceURL = try await separateStem(
                 source: request.sourceURL,
                 stemSelection: request.stemSelection,
                 outputDirectory: workDirectory.appendingPathComponent("separated", isDirectory: true),
                 demucsURL: demucsURL,
-                cancellation: cancellation
+                cancellation: cancellation,
+                log: log
             )
             completedSteps += 1
+            log("已取得\(request.stemSelection.displayName)音轨：\(pitchSourceURL.path)")
             progress(completedSteps / totalSteps)
         }
 
         if request.processingMode == .exportOnly {
+            log("步骤 \(Int(completedSteps) + 1)/\(stepCount)：编码选中音轨为 MP3。")
             try await run(
                 tool: "ffmpeg",
                 executableURL: ffmpegURL,
@@ -218,7 +248,8 @@ public final class RubberbandPitchShifter {
                 ] + Self.mp3EncodingArguments + [
                     tempMP3.path
                 ],
-                cancellation: cancellation
+                cancellation: cancellation,
+                log: log
             )
 
             if FileManager.default.fileExists(atPath: request.outputURL.path) {
@@ -226,6 +257,7 @@ public final class RubberbandPitchShifter {
             }
             try FileManager.default.moveItem(at: tempMP3, to: request.outputURL)
             progress(1)
+            log("完成：\(request.outputURL.path)")
             return
         }
 
@@ -233,24 +265,29 @@ public final class RubberbandPitchShifter {
             throw PitchShiftError.rubberbandNotFound
         }
 
+        log("步骤 \(Int(completedSteps) + 1)/\(stepCount)：把选中音轨转成 WAV，作为 Rubber Band 输入。")
         try await run(
             tool: "ffmpeg",
             executableURL: ffmpegURL,
             arguments: ["-hide_banner", "-nostats", "-y", "-i", pitchSourceURL.path, inputWAV.path],
-            cancellation: cancellation
+            cancellation: cancellation,
+            log: log
         )
         completedSteps += 1
         progress(completedSteps / totalSteps)
 
+        log("步骤 \(Int(completedSteps) + 1)/\(stepCount)：Rubber Band 调音 \(request.pitchValue) 个半音。")
         try await run(
             tool: "rubberband",
             executableURL: rubberbandURL,
             arguments: ["-p", "\(request.pitchValue)", inputWAV.path, outputWAV.path],
-            cancellation: cancellation
+            cancellation: cancellation,
+            log: log
         )
         completedSteps += 1
         progress(completedSteps / totalSteps)
 
+        log("步骤 \(Int(completedSteps) + 1)/\(stepCount)：把调音后的 WAV 编码为 320k MP3。")
         try await run(
             tool: "ffmpeg",
             executableURL: ffmpegURL,
@@ -263,7 +300,8 @@ public final class RubberbandPitchShifter {
             ] + Self.mp3EncodingArguments + [
                 tempMP3.path
             ],
-            cancellation: cancellation
+            cancellation: cancellation,
+            log: log
         )
 
         if FileManager.default.fileExists(atPath: request.outputURL.path) {
@@ -271,26 +309,31 @@ public final class RubberbandPitchShifter {
         }
         try FileManager.default.moveItem(at: tempMP3, to: request.outputURL)
         progress(1)
+        log("完成：\(request.outputURL.path)")
     }
 
     private func run(
         tool: String,
         executableURL: URL,
         arguments: [String],
-        cancellation: CancellationChecking
+        cancellation: CancellationChecking,
+        log: @escaping (String) -> Void
     ) async throws {
         if cancellation.isCancellationRequested {
             throw PitchShiftError.cancelled
         }
 
+        log("执行命令：\(executableURL.path) \(arguments.map(Self.shellEscaped).joined(separator: " "))")
         let result = try await runner.run(
             executableURL: executableURL,
             arguments: arguments,
             cancellation: cancellation
         )
         guard result.exitCode == 0 else {
+            log("\(tool) 失败，退出码 \(result.exitCode)：\(result.output)")
             throw PitchShiftError.commandFailed(tool, result.exitCode, result.output)
         }
+        log("\(tool) 完成。")
     }
 
     private func separateStem(
@@ -298,7 +341,8 @@ public final class RubberbandPitchShifter {
         stemSelection: AudioStemSelection,
         outputDirectory: URL,
         demucsURL: URL,
-        cancellation: CancellationChecking
+        cancellation: CancellationChecking,
+        log: @escaping (String) -> Void
     ) async throws -> URL {
         guard let outputFileName = stemSelection.demucsOutputFileName else {
             return source
@@ -319,7 +363,8 @@ public final class RubberbandPitchShifter {
                 outputDirectory.path,
                 source.path
             ],
-            cancellation: cancellation
+            cancellation: cancellation,
+            log: log
         )
 
         let separatedURL = outputDirectory
@@ -331,6 +376,14 @@ public final class RubberbandPitchShifter {
             throw PitchShiftError.separatedStemMissing(separatedURL.path)
         }
         return separatedURL
+    }
+
+    private static func shellEscaped(_ value: String) -> String {
+        if value.rangeOfCharacter(from: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "'\"\\$`"))) == nil {
+            return value
+        }
+
+        return "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }
 
